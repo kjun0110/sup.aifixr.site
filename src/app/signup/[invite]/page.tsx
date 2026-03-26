@@ -1,10 +1,11 @@
 import { ThirdPartyInfoAgreementSign } from '../../components/auth/ThirdPartyInfoAgreementSign';
 
-export default function SignupAgreementInvitePage({
+export default async function SignupAgreementInvitePage({
   params,
 }: {
-  params: { invite: string };
+  params: Promise<{ invite: string }>;
 }) {
-  return <ThirdPartyInfoAgreementSign invite={params.invite} />;
+  const { invite } = await params;
+  return <ThirdPartyInfoAgreementSign invite={invite} />;
 }
 

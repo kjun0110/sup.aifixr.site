@@ -3,22 +3,55 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Mail, Lock, FileText } from "lucide-react";
+import { login } from "@/lib/api/iam";
+import { toast } from "sonner";
 
 export function Login() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Mock login - 실제로는 API 호출
-    router.push("/projects");
+    
+    if (!email || !password) {
+      toast.error("이메일과 비밀번호를 입력해주세요");
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const response = await login(email, password);
+      
+      // 로그인 성공 시 토큰 및 사용자 정보 저장 (Gateway 응답 형식)
+      localStorage.setItem("access_token", response.accessToken);
+      localStorage.setItem("user_id", response.user.id);
+      localStorage.setItem("user_type", response.user.userType);
+      localStorage.setItem("x-actor-user-id", response.user.id);
+      if (response.user.companyName) {
+        localStorage.setItem("company_name", response.user.companyName);
+      }
+      
+      toast.success("로그인 성공!");
+      router.push("/projects");
+    } catch (error) {
+      console.error("로그인 실패:", error);
+      toast.error("로그인에 실패했습니다. 이메일과 비밀번호를 확인해주세요.");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleSocialLogin = (provider: string) => {
-    // Mock social login - 실제로는 OAuth 플로우
-    console.log(`${provider} 로그인`);
-    router.push("/projects");
+    if (provider === 'google') {
+      // Google OAuth 로그인 플로우
+      window.location.href = 'http://localhost:8080/api/oauth/google/login';
+    } else {
+      // Mock social login - 실제로는 OAuth 플로우
+      console.log(`${provider} 로그인`);
+      router.push("/projects");
+    }
   };
 
   return (
@@ -213,7 +246,8 @@ export function Login() {
               {/* Login Button */}
               <button
                 type="submit"
-                className="w-full py-3 rounded-xl text-white transition-all hover:opacity-90"
+                disabled={isLoading}
+                className="w-full py-3 rounded-xl text-white transition-all hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                 style={{
                   background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
                   fontWeight: 600,
@@ -221,7 +255,7 @@ export function Login() {
                   boxShadow: '0px 4px 12px rgba(91, 59, 250, 0.3)'
                 }}
               >
-                로그인
+                {isLoading ? "로그인 중..." : "로그인"}
               </button>
             </form>
 

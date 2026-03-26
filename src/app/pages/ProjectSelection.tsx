@@ -1,5 +1,10 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ProjectCard } from "../components/ProjectCard";
 import { Search } from "lucide-react";
+import { getMyProjects, SupplierProject } from "../../lib/api/supply-chain";
 
 // Mock data for demonstration
 const mockProjects = [
@@ -39,6 +44,38 @@ const mockProjects = [
 ];
 
 export function ProjectSelection() {
+  const router = useRouter();
+  const [realProjects, setRealProjects] = useState<SupplierProject[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // 로그인 체크
+    const token = localStorage.getItem("access_token");
+    if (!token) {
+      console.log("로그인 토큰이 없습니다. 로그인 페이지로 이동합니다.");
+      router.push("/");
+      return;
+    }
+
+    getMyProjects()
+      .then((projects) => {
+        setRealProjects(projects);
+      })
+      .catch((error) => {
+        console.error("프로젝트 목록 조회 실패:", error);
+        // 401 에러면 로그인 페이지로 리다이렉트
+        if (error.message?.includes("401")) {
+          localStorage.clear();
+          router.push("/");
+        }
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }, [router]);
+
+  // Mock 데이터와 실제 데이터 합치기
+  const allProjects = [...mockProjects, ...realProjects];
   return (
     <div>
       {/* Page Header */}
@@ -88,13 +125,24 @@ export function ProjectSelection() {
 
       {/* Project Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {mockProjects.map((project) => (
-          <ProjectCard key={project.id} {...project} />
-        ))}
+        {loading ? (
+          <div className="col-span-full text-center py-12 text-gray-500">
+            프로젝트 목록을 불러오는 중...
+          </div>
+        ) : (
+          <>
+            {mockProjects.map((project) => (
+              <ProjectCard key={`mock-${project.id}`} {...project} />
+            ))}
+            {realProjects.map((project) => (
+              <ProjectCard key={`real-${project.id}`} {...project} />
+            ))}
+          </>
+        )}
       </div>
 
       {/* Empty State (hidden when there are projects) */}
-      {mockProjects.length === 0 && (
+      {!loading && allProjects.length === 0 && (
         <div className="text-center py-24">
           <div 
             className="w-24 h-24 rounded-full mx-auto mb-6 flex items-center justify-center"

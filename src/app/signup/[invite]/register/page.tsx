@@ -1,10 +1,11 @@
 import { SignupRegister } from '../../../components/auth/SignupRegister';
 
-export default function SignupRegisterInvitePage({
+export default async function SignupRegisterInvitePage({
   params,
 }: {
-  params: { invite: string };
+  params: Promise<{ invite: string }>;
 }) {
-  return <SignupRegister invite={params.invite} />;
+  const { invite } = await params;
+  return <SignupRegister invite={invite} />;
 }
 

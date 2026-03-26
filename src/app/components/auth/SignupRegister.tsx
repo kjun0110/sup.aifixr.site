@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { Building2, User, Mail, Phone, Lock, Briefcase, ArrowLeft } from 'lucide-react';
 
@@ -8,17 +8,61 @@ import { Button } from '../ui/button';
 import { Card, CardContent } from '../ui/card';
 import { Checkbox } from '../ui/checkbox';
 import { Input } from '../ui/input';
+import { getInvitationPreview } from '@/lib/api/invitation';
+import { submitSignup, submitGoogleSignup } from '@/lib/api/iam';
 
 const LS_REGISTERED_KEY = 'aifix_mock_registered';
 const LS_INVITE_KEY = 'aifix_mock_invite';
 
 type SignupMethod = 'none' | 'google' | 'email';
 
+// Field 컴포넌트를 외부로 이동하여 재생성 방지
+const Field = ({
+  label,
+  icon,
+  value,
+  onChange,
+  placeholder,
+  type = 'text',
+  required,
+}: {
+  label: string;
+  icon: ReactNode;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
+  required?: boolean;
+}) => {
+  return (
+    <div>
+      <label className="block text-sm font-semibold text-gray-900 mb-2">
+        {label}
+        {required ? <span className="text-red-500 ml-1">*</span> : null}
+      </label>
+      <div className="relative">
+        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">{icon}</div>
+        <Input
+          type={type}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="pl-10 bg-white"
+        />
+      </div>
+    </div>
+  );
+};
+
 export function SignupRegister({ invite }: { invite?: string }) {
   const router = useRouter();
 
   const [signupMethod, setSignupMethod] = useState<SignupMethod>('none');
   const [googleEmail, setGoogleEmail] = useState<string | null>(null);
+  const [googleName, setGoogleName] = useState<string | null>(null);
+  const [googleUserId, setGoogleUserId] = useState<string | null>(null);
+  const [googleRefreshToken, setGoogleRefreshToken] = useState<string | null>(null);
+  const [googleScope, setGoogleScope] = useState<string | null>(null);
 
   const [companyName, setCompanyName] = useState('');
   const [representativeName, setRepresentativeName] = useState('');
@@ -29,6 +73,7 @@ export function SignupRegister({ invite }: { invite?: string }) {
   const [contactDepartment, setContactDepartment] = useState('');
   const [contactPosition, setContactPosition] = useState('');
   const [contactEmail, setContactEmail] = useState('');
+  const [invitedEmail, setInvitedEmail] = useState(''); // 초대받은 이메일 (변경 불가)
   const [contactPhone, setContactPhone] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
@@ -36,16 +81,106 @@ export function SignupRegister({ invite }: { invite?: string }) {
   const [agreeAll, setAgreeAll] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  const isGoogleSignup = signupMethod === 'google' && googleEmail;
-  const displayEmail = isGoogleSignup ? googleEmail : contactEmail;
+  const isGoogleSignup = signupMethod === 'google';
+  // 초대받은 이메일을 항상 표시 (Google 연동 여부와 무관)
+  const displayEmail = contactEmail;
+
+  // Google OAuth 콜백 처리
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    const params = new URLSearchParams(window.location.search);
+    const googleUserId = params.get('userId');
+    const googleEmail = params.get('email');
+    const googleName = params.get('name');
+    const googleRefreshToken = params.get('googleRefreshToken');
+    const googleScope = params.get('scope');
+    const error = params.get('error');
+
+    if (error) {
+      alert('Google 인증 실패: ' + error);
+      setSignupMethod('none');
+      return;
+    }
+
+    if (googleUserId && googleEmail && googleRefreshToken) {
+      setSignupMethod('google');
+      setGoogleUserId(googleUserId);
+      setGoogleEmail(googleEmail);
+      setGoogleName(googleName);
+      setGoogleRefreshToken(googleRefreshToken);
+      setGoogleScope(googleScope);
+      // Google 이메일은 저장만 하고, contactEmail은 초대받은 이메일 유지
+      if (googleName) {
+        setContactName(googleName);
+      }
+      
+      // localStorage에서 폼 데이터 복원
+      const savedFormData = localStorage.getItem('signup_form_data');
+      if (savedFormData) {
+        try {
+          const formData = JSON.parse(savedFormData);
+          setCompanyName(formData.companyName || '');
+          setRepresentativeName(formData.representativeName || '');
+          setCompanyRegNumber(formData.companyRegNumber || '');
+          setCompanyLocation(formData.companyLocation || '');
+          // 초대받은 이메일 복원 (Google 이메일로 덮어쓰지 않음)
+          setContactEmail(formData.contactEmail || '');
+          setContactName(formData.contactName || googleName || '');
+          setContactDepartment(formData.contactDepartment || '');
+          setContactPosition(formData.contactPosition || '');
+          setContactPhone(formData.contactPhone || '');
+          setAgreeAll(formData.agreeAll || false);
+          localStorage.removeItem('signup_form_data');
+        } catch (e) {
+          console.error('폼 데이터 복원 실패:', e);
+        }
+      }
+      
+      // URL 파라미터 정리
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  // 초대 정보로 폼 자동 채우기
+  useEffect(() => {
+    if (!invite) return;
+
+    getInvitationPreview(invite)
+      .then((data) => {
+        if (data.invitee_company_hint) {
+          setCompanyName(data.invitee_company_hint);
+        }
+        if (data.invitee_name && !googleName) {
+          setContactName(data.invitee_name);
+        }
+        // 초대받은 이메일 저장 (이메일 회원가입 시 사용)
+        if (data.invitee_email) {
+          setInvitedEmail(data.invitee_email);
+        }
+      })
+      .catch((error) => {
+        console.error('초대 정보 조회 실패:', error);
+      });
+  }, [invite, googleName]);
 
   const handleGoogleSignup = () => {
-    // TODO: 실제 Google OAuth 연동 시 popup/redirect 처리
-    // Mock: Google 계정 연동 완료 시뮬레이션 - 이메일만 자동 입력
-    const mockEmail = 'user@gmail.com';
-    setGoogleEmail(mockEmail);
-    setContactEmail(mockEmail);
+    // Google 회원가입 방식 선택 - 이메일 필드는 비움 (사용자가 직접 입력)
+    setSignupMethod('google');
+    setContactEmail('');
   };
+  
+  const handleEmailSignup = () => {
+    // 이메일 회원가입 방식 선택 - 초대받은 이메일 자동 채움
+    setSignupMethod('email');
+  };
+
+  // 이메일 회원가입 모드일 때 초대받은 이메일 자동 채우기
+  useEffect(() => {
+    if (signupMethod === 'email' && invitedEmail && !contactEmail) {
+      setContactEmail(invitedEmail);
+    }
+  }, [signupMethod, invitedEmail, contactEmail]);
 
   const validate = () => {
     if (!companyName.trim()) return '회사명을 입력해주세요.';
@@ -64,6 +199,11 @@ export function SignupRegister({ invite }: { invite?: string }) {
   };
 
   const handleSubmit = async () => {
+    if (!invite) {
+      alert('초대 정보가 없습니다.');
+      return;
+    }
+
     const error = validate();
     if (error) {
       alert(error);
@@ -72,50 +212,79 @@ export function SignupRegister({ invite }: { invite?: string }) {
 
     setSubmitting(true);
     try {
-      // TODO: 실제 회원가입 API 연동 필요
-      localStorage.setItem(LS_REGISTERED_KEY, 'true');
-      localStorage.setItem(LS_INVITE_KEY, invite || '');
-      router.push('/projects');
+      if (signupMethod === 'google' && !googleUserId) {
+        // Google 회원가입인데 아직 OAuth 인증을 안 한 경우 - 폼 데이터를 localStorage에 저장하고 OAuth 시작
+        localStorage.setItem('signup_form_data', JSON.stringify({
+          companyName,
+          representativeName,
+          companyRegNumber,
+          companyLocation,
+          contactEmail, // 초대받은 이메일 저장
+          contactName,
+          contactDepartment,
+          contactPosition,
+          contactPhone,
+          agreeAll,
+        }));
+        
+        // Google OAuth로 리다이렉트
+        window.location.href = `http://localhost:8080/api/oauth/google/signup/sup?invite=${encodeURIComponent(invite)}`;
+        return;
+      }
+      
+      let response;
+      
+      if (isGoogleSignup && googleUserId && googleRefreshToken) {
+        // Google OAuth 회원가입 (OAuth 인증 완료 후)
+        response = await submitGoogleSignup(invite, {
+          google_user_id: googleUserId,
+          google_email: googleEmail!,
+          google_name: googleName,
+          google_refresh_token: googleRefreshToken,
+          google_scope: googleScope,
+          company_name: companyName,
+          rep_name: representativeName,
+          business_reg_no: companyRegNumber,
+          address: companyLocation,
+          name: contactName,
+          contact: contactPhone,
+          department_name: contactDepartment || null,
+          position: contactPosition || null,
+          terms_agreed: agreeAll,
+        });
+      } else {
+        // 이메일 회원가입
+        response = await submitSignup(invite, {
+          company_name: companyName,
+          rep_name: representativeName,
+          business_reg_no: companyRegNumber,
+          address: companyLocation,
+          name: contactName,
+          contact: contactPhone,
+          email: displayEmail,
+          password: password,
+          password_confirm: passwordConfirm,
+          terms_agreed: agreeAll,
+        });
+      }
+
+      if (response.success) {
+        alert(response.message || '회원가입 신청이 완료되었습니다. 직상위 차사 승인 후 로그인 가능합니다.');
+        localStorage.setItem(LS_REGISTERED_KEY, 'true');
+        localStorage.setItem(LS_INVITE_KEY, invite);
+        localStorage.removeItem('signup_form_data');
+        
+        // 로그인 페이지로 이동
+        router.push('/');
+      } else {
+        alert(response.message || '회원가입 신청 중 오류가 발생했습니다.');
+      }
+    } catch (error) {
+      console.error('회원가입 신청 실패:', error);
+      alert('회원가입 신청 중 오류가 발생했습니다. 다시 시도해주세요.');
     } finally {
       setSubmitting(false);
     }
-  };
-
-  const Field = ({
-    label,
-    icon,
-    value,
-    onChange,
-    placeholder,
-    type = 'text',
-    required,
-  }: {
-    label: string;
-    icon: ReactNode;
-    value: string;
-    onChange: (v: string) => void;
-    placeholder?: string;
-    type?: string;
-    required?: boolean;
-  }) => {
-    return (
-      <div>
-        <label className="block text-sm font-semibold text-gray-900 mb-2">
-          {label}
-          {required ? <span className="text-red-500 ml-1">*</span> : null}
-        </label>
-        <div className="relative">
-          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">{icon}</div>
-          <Input
-            type={type}
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder={placeholder}
-            className="pl-10 bg-white"
-          />
-        </div>
-      </div>
-    );
   };
 
   // 1단계: 회원가입 방법 선택
@@ -132,10 +301,7 @@ export function SignupRegister({ invite }: { invite?: string }) {
             <CardContent className="p-6 space-y-4">
               <button
                 type="button"
-                onClick={() => {
-                  setSignupMethod('google');
-                  handleGoogleSignup();
-                }}
+                onClick={handleGoogleSignup}
                 className="w-full py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all hover:bg-gray-50 border border-gray-200 bg-white"
               >
                 <svg width="20" height="20" viewBox="0 0 18 18" fill="none">
@@ -155,7 +321,7 @@ export function SignupRegister({ invite }: { invite?: string }) {
 
               <button
                 type="button"
-                onClick={() => setSignupMethod('email')}
+                onClick={handleEmailSignup}
                 className="w-full py-3.5 rounded-xl flex items-center justify-center gap-2 transition-all border-2 font-semibold"
                 style={{
                   borderColor: 'var(--aifix-primary)',
@@ -209,6 +375,11 @@ export function SignupRegister({ invite }: { invite?: string }) {
             onClick={() => {
               setSignupMethod('none');
               setGoogleEmail(null);
+              setGoogleName(null);
+              setGoogleUserId(null);
+              setGoogleRefreshToken(null);
+              setGoogleScope(null);
+              // 이메일 필드 비우기 (다시 선택 시 자동 채움)
               setContactEmail('');
               setPassword('');
               setPasswordConfirm('');
@@ -314,10 +485,9 @@ export function SignupRegister({ invite }: { invite?: string }) {
                     <Input
                       type="email"
                       value={displayEmail}
-                      onChange={(e) => !isGoogleSignup && setContactEmail(e.target.value)}
-                      placeholder="contact@company.com"
+                      onChange={(e) => setContactEmail(e.target.value)}
+                      placeholder={isGoogleSignup ? "contact@gmail.com" : "contact@company.com"}
                       className="pl-10 bg-white"
-                      disabled={!!isGoogleSignup}
                     />
                     {isGoogleSignup && (
                       <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">

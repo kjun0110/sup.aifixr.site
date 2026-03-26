@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { ProjectNav } from "../components/ProjectNav";
 import { SupplyChainManagement } from "../components/SupplyChainManagement";
 import { DataManagementNew } from "../components/DataManagementNew";
@@ -15,6 +15,7 @@ import { NonTier1DataView } from "../components/non-tier1/NonTier1DataView";
 import { NonTier1PCFSubmit } from "../components/non-tier1/NonTier1PCFSubmit";
 import { NonTier1Transmission } from "../components/non-tier1/NonTier1Transmission";
 import { NonTier1History } from "../components/non-tier1/NonTier1History";
+import { getMyProjectDetail, SupplierProject } from "../../lib/api/supply-chain";
 import { 
   TrendingUp, 
   AlertCircle, 
@@ -24,7 +25,7 @@ import {
   ArrowDownRight 
 } from "lucide-react";
 
-// Mock project data
+// Mock project data (목 데이터 유지)
 const mockProjectData: Record<string, { name: string; clientName: string; contractNumber: string; tier: "tier1" | "tier2" | "tier3" }> = {
   p1: { 
     name: "[삼성SDI] 양극재 납품", 
@@ -48,12 +49,57 @@ const mockProjectData: Record<string, { name: string; clientName: string; contra
 
 export function ProjectView() {
   const params = useParams();
-  const projectId = typeof params.projectId === 'string' ? params.projectId : params.projectId?.[0];
+  const router = useRouter();
+  const projectIdParam = typeof params.projectId === 'string' ? params.projectId : params.projectId?.[0];
   const [activeTab, setActiveTab] = useState("dashboard");
   const searchParams = useSearchParams();
+  const [project, setProject] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   
-  const project = projectId ? mockProjectData[projectId as keyof typeof mockProjectData] : mockProjectData['p1'];
   const currentTier = project?.tier || "tier1";
+
+  // 프로젝트 상세 정보 로드
+  useEffect(() => {
+    if (!projectIdParam) return;
+    
+    // 목 데이터 프로젝트인 경우 (p1, p2, p3)
+    if (mockProjectData[projectIdParam]) {
+      setProject(mockProjectData[projectIdParam]);
+      setLoading(false);
+      return;
+    }
+    
+    // 실제 프로젝트인 경우 (real-로 시작하는 경우)
+    if (projectIdParam.startsWith('real-')) {
+      const numericId = projectIdParam.replace(/^real-/, '');
+      const projectId = parseInt(numericId, 10);
+      
+      if (isNaN(projectId)) {
+        console.error("Invalid project ID:", projectIdParam);
+        setLoading(false);
+        return;
+      }
+      
+      getMyProjectDetail(projectId)
+        .then((data) => {
+          setProject(data);
+        })
+        .catch((error) => {
+          console.error("프로젝트 상세 조회 실패:", error);
+          if (error.message?.includes("401")) {
+            localStorage.clear();
+            router.push("/");
+          }
+        })
+        .finally(() => {
+          setLoading(false);
+        });
+    } else {
+      // 알 수 없는 프로젝트 ID
+      console.error("Unknown project ID format:", projectIdParam);
+      setLoading(false);
+    }
+  }, [projectIdParam, router]);
 
   // URL 파라미터에서 탭 읽기
   useEffect(() => {
@@ -63,8 +109,12 @@ export function ProjectView() {
     }
   }, [searchParams]);
 
+  if (loading) {
+    return <div className="p-8 text-center">프로젝트 정보를 불러오는 중...</div>;
+  }
+
   if (!project) {
-    return <div>프로젝트를 찾을 수 없습니다</div>;
+    return <div className="p-8 text-center">프로젝트를 찾을 수 없습니다</div>;
   }
 
   // Render tab content based on tier and active tab

@@ -43,6 +43,12 @@ export async function apiFetch<T = unknown>(
     if (actor && !headers.has("X-Actor-User-Id")) {
       headers.set("X-Actor-User-Id", actor);
     }
+    
+    // JWT 토큰 추가
+    const token = localStorage.getItem("access_token");
+    if (token && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
   }
 
   if (json !== undefined) {

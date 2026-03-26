@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { ShieldCheck } from 'lucide-react';
 
@@ -8,6 +8,7 @@ import { Button } from '../ui/button';
 import { Card, CardContent } from '../ui/card';
 import { Checkbox } from '../ui/checkbox';
 import { Input } from '../ui/input';
+import { acceptAgreement, getInvitationPreview } from '@/lib/api/invitation';
 
 const LS_REGISTERED_KEY = 'aifix_mock_registered';
 const LS_INVITE_KEY = 'aifix_mock_invite';
@@ -57,6 +58,7 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
 
   const [agreeSubmitting, setAgreeSubmitting] = useState(false);
   const [approvalPopupOpen, setApprovalPopupOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
   const isRegisteredMock = () => {
     if (typeof window === 'undefined') return false;
@@ -65,6 +67,28 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
 
   const canSubmit =
     agreeCollection && agreeThirdParty && signerName.trim() === '동의합니다';
+
+  // 페이지 로드 시 이미 동의했는지 확인
+  useEffect(() => {
+    if (!invite) {
+      setIsLoading(false);
+      return;
+    }
+
+    getInvitationPreview(invite)
+      .then((data) => {
+        if (data.contract_agreed_at) {
+          // 이미 동의한 경우 회원가입 페이지로 리다이렉트
+          router.push(`/signup/${encodeURIComponent(invite)}/register`);
+        } else {
+          setIsLoading(false);
+        }
+      })
+      .catch((error) => {
+        console.error('초대 정보 조회 실패:', error);
+        setIsLoading(false);
+      });
+  }, [invite, router]);
 
   const handleSignSubmit = async () => {
     if (!invite) {
@@ -78,6 +102,9 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
 
     setAgreeSubmitting(true);
     try {
+      // API 호출: 데이터 계약 동의
+      await acceptAgreement(invite);
+
       localStorage.setItem(LS_INVITE_KEY, invite || '');
       localStorage.setItem(LS_AGREEMENT_SIGNED_KEY, 'true');
 
@@ -86,6 +113,9 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
       } else {
         router.push(`/signup/${encodeURIComponent(invite)}/register`);
       }
+    } catch (error) {
+      console.error('데이터 계약 동의 실패:', error);
+      alert('데이터 계약 동의 처리 중 오류가 발생했습니다.');
     } finally {
       setAgreeSubmitting(false);
     }
@@ -95,6 +125,18 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
     setApprovalPopupOpen(false);
     router.push('/projects');
   };
+
+  // 로딩 중
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#EEF3FF] flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">초대 정보를 확인하고 있습니다...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#EEF3FF] flex justify-center p-6 md:p-8">
