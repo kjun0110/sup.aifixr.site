@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Mail, Lock, FileText } from "lucide-react";
-import { login } from "@/lib/api/iam";
+import { login, SupLoginFailedError } from "@/lib/api/iam";
 import { toast } from "sonner";
 
 export function Login() {
@@ -22,22 +22,16 @@ export function Login() {
 
     setIsLoading(true);
     try {
-      const response = await login(email, password);
-      
-      // 로그인 성공 시 토큰 및 사용자 정보 저장 (Gateway 응답 형식)
-      localStorage.setItem("access_token", response.accessToken);
-      localStorage.setItem("user_id", response.user.id);
-      localStorage.setItem("user_type", response.user.userType);
-      localStorage.setItem("x-actor-user-id", response.user.id);
-      if (response.user.companyName) {
-        localStorage.setItem("company_name", response.user.companyName);
-      }
-      
+      await login(email, password);
       toast.success("로그인 성공!");
       router.push("/projects");
     } catch (error) {
       console.error("로그인 실패:", error);
-      toast.error("로그인에 실패했습니다. 이메일과 비밀번호를 확인해주세요.");
+      if (error instanceof SupLoginFailedError) {
+        toast.error(error.message);
+      } else {
+        toast.error(error instanceof Error ? error.message : "로그인에 실패했습니다.");
+      }
     } finally {
       setIsLoading(false);
     }

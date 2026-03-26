@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { ProjectCard } from "../components/ProjectCard";
 import { Search } from "lucide-react";
 import { getMyProjects, SupplierProject } from "../../lib/api/supply-chain";
+import { getSupAccessToken } from "../../lib/api/sessionAccessToken";
+import { AIFIXR_SESSION_UPDATED_EVENT } from "../../lib/api/client";
 
 // Mock data for demonstration
 const mockProjects = [
@@ -49,29 +51,62 @@ export function ProjectSelection() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // 로그인 체크
-    const token = localStorage.getItem("access_token");
-    if (!token) {
-      console.log("로그인 토큰이 없습니다. 로그인 페이지로 이동합니다.");
-      router.push("/");
-      return;
-    }
+    let mounted = true;
+    let loadAttempted = false;
+    
+    const load = async () => {
+      if (loadAttempted) return;
+      loadAttempted = true;
+      
+      // 로그인 체크 (메모리 토큰)
+      const token = getSupAccessToken();
+      if (!token) {
+        console.log("로그인 토큰이 없습니다. 로그인 페이지로 이동합니다.");
+        router.push("/");
+        return;
+      }
 
-    getMyProjects()
-      .then((projects) => {
-        setRealProjects(projects);
-      })
-      .catch((error) => {
+      try {
+        const projects = await getMyProjects();
+        if (mounted) {
+          setRealProjects(projects);
+        }
+      } catch (error) {
         console.error("프로젝트 목록 조회 실패:", error);
         // 401 에러면 로그인 페이지로 리다이렉트
-        if (error.message?.includes("401")) {
+        if (error instanceof Error && error.message?.includes("401")) {
           localStorage.clear();
           router.push("/");
         }
-      })
-      .finally(() => {
-        setLoading(false);
-      });
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+    
+    // 세션 복원 대기 후 로드
+    const timer = setTimeout(() => {
+      void load();
+    }, 500);
+    
+    // 세션 업데이트 이벤트 리스너
+    const handleSessionUpdate = () => {
+      clearTimeout(timer);
+      void load();
+    };
+    
+    if (typeof window !== 'undefined') {
+      window.addEventListener(AIFIXR_SESSION_UPDATED_EVENT, handleSessionUpdate);
+    }
+    
+    return () => {
+      mounted = false;
+      clearTimeout(timer);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener(AIFIXR_SESSION_UPDATED_EVENT, handleSessionUpdate);
+      }
+    };
   }, [router]);
 
   // Mock 데이터와 실제 데이터 합치기

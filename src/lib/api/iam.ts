@@ -1,5 +1,6 @@
-import { apiFetch } from "./client";
-import { API_PREFIX } from "./paths";
+import { apiFetch, apiUrl, actorStorageKey, AIFIXR_SESSION_UPDATED_EVENT } from "./client";
+import { setSupAccessToken } from "./sessionAccessToken";
+import { API_PREFIX, PATH_AUTH_SUP_LOGIN } from "./paths";
 
 /** IAM 베이스 경로 — 가입·승인·로그인 등 */
 export const IAM_BASE = API_PREFIX.IAM;
@@ -62,24 +63,59 @@ export async function submitGoogleSignup(
   });
 }
 
+export type SupLoginUser = {
+  id: string;
+  email: string;
+  userType: string;
+  companyName?: string;
+  provider: string;
+};
+
+export type SupLoginResponse = {
+  accessToken: string;
+  user: SupLoginUser;
+};
+
+export class SupLoginFailedError extends Error {
+  constructor(message = "이메일 또는 비밀번호가 올바르지 않습니다.") {
+    super(message);
+    this.name = "SupLoginFailedError";
+  }
+}
+
 /**
  * 협력사 로그인 (이메일/비밀번호) - Gateway를 통한 로그인
  */
 export async function login(
   email: string,
   password: string
-): Promise<{
-  accessToken: string;
-  user: {
-    id: string;
-    email: string;
-    userType: string;
-    companyName?: string;
-    provider: string;
-  };
-}> {
-  return apiFetch(`/api/auth/sup/login`, {
+): Promise<SupLoginResponse> {
+  const res = await fetch(apiUrl(PATH_AUTH_SUP_LOGIN), {
     method: "POST",
-    json: { email, password },
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ email: email.trim(), password }),
   });
+
+  if (res.status === 401) {
+    throw new SupLoginFailedError();
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `로그인 실패 (${res.status})`);
+  }
+
+  const data = (await res.json()) as SupLoginResponse;
+  if (typeof window !== "undefined") {
+    setSupAccessToken(data.accessToken);
+    localStorage.setItem(actorStorageKey(), data.user.id);
+    localStorage.setItem("user_id", data.user.id);
+    localStorage.setItem("user_type", data.user.userType);
+    if (data.user.companyName) {
+      localStorage.setItem("company_name", data.user.companyName);
+    }
+    window.dispatchEvent(new Event(AIFIXR_SESSION_UPDATED_EVENT));
+  }
+  return data;
 }

@@ -17,3 +17,12 @@ export const PATH_HEALTH = "/health";
 /** 스모크용 (KJ main) */
 export const PATH_API_TEST = "/api/test";
 
+/** 협력사 이메일 로그인 (게이트웨이 JAR auth.sup) */
+export const PATH_AUTH_SUP_LOGIN = "/api/auth/sup/login";
+
+/** 리프레시 쿠키로 새 액세스 발급 */
+export const PATH_AUTH_SUP_REFRESH = "/api/auth/sup/refresh";
+
+/** 리프레시 세션 폐기 + 쿠키 삭제 */
+export const PATH_AUTH_SUP_LOGOUT = "/api/auth/sup/logout";
+

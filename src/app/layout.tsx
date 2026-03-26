@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { SiteProvider } from './contexts/SiteContext';
+import SupSessionRestore from './components/SupSessionRestore';
 import '../styles/index.css';
 
 export const metadata: Metadata = {
@@ -15,7 +16,10 @@ export default function RootLayout({
   return (
     <html lang="ko">
       <body>
-        <SiteProvider>{children}</SiteProvider>
+        <SiteProvider>
+          <SupSessionRestore />
+          {children}
+        </SiteProvider>
       </body>
     </html>
   );
