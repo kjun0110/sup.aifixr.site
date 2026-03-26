@@ -10,7 +10,7 @@ type ProjectCardProps = {
   productItemNumber: string;
   contractPeriod: string;
   contractNumber: string;
-  lastSubmission: string;
+  lastSubmission: string | null;
   status: string;
 };
 
@@ -115,7 +115,7 @@ export function ProjectCard({
           <Clock className="w-4 h-4" style={{ color: 'var(--aifix-gray)' }} />
           <span style={{ fontSize: '15px', color: 'var(--aifix-gray)' }}>최근 제출일:</span>
           <span style={{ fontSize: '15px', color: 'var(--aifix-navy)', fontWeight: 500 }}>
-            {lastSubmission}
+            {lastSubmission || "제출 내역 없음"}
           </span>
         </div>
       </div>
