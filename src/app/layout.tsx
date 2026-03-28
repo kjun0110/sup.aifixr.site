@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import { SiteProvider } from './contexts/SiteContext';
 import SupSessionRestore from './components/SupSessionRestore';
+import { AppToaster } from './components/AppToaster';
+import { SupGoogleLinkReturnHandler } from './components/SupGoogleLinkReturnHandler';
 import '../styles/index.css';
 
 export const metadata: Metadata = {
@@ -18,6 +20,8 @@ export default function RootLayout({
       <body>
         <SiteProvider>
           <SupSessionRestore />
+          <AppToaster />
+          <SupGoogleLinkReturnHandler />
           {children}
         </SiteProvider>
       </body>

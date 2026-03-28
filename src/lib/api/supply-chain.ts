@@ -17,7 +17,11 @@ export interface SupplierProject {
   status: string;
   company_name: string;
   supplier_id: number;
+  /** 공급망 승인 노드 기준 UI 차수 (프로젝트마다 다를 수 있음) */
   tier?: string;
+  product_variant_id?: number | null;
+  /** 하위 초대 시 parent_supply_chain_node_id 로 사용 */
+  my_supply_chain_node_id?: number | null;
 }
 
 /** 협력사 사용자가 참여 중인 프로젝트 목록 조회 */
@@ -28,4 +32,34 @@ export async function getMyProjects(): Promise<SupplierProject[]> {
 /** 협력사 프로젝트 상세 조회 */
 export async function getMyProjectDetail(projectId: number): Promise<SupplierProject> {
   return apiFetch<SupplierProject>(`${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}`);
+}
+
+/** 직하위 등록만 된 공급망 노드(added) — 초대 시 선택 */
+export type RegisteredDirectChild = {
+  id: number;
+  supplier_id: number;
+  company_name: string;
+  status: string;
+  node_code: string | null;
+};
+
+export async function getRegisteredDirectChildren(
+  projectId: number,
+): Promise<RegisteredDirectChild[]> {
+  return apiFetch<RegisteredDirectChild[]>(
+    `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}/registered-direct-children`,
+  );
+}
+
+export async function postRegisterDirectChild(
+  projectId: number,
+  body: { company_name: string; business_registration_number: string },
+): Promise<RegisteredDirectChild> {
+  return apiFetch<RegisteredDirectChild>(
+    `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}/registered-direct-children`,
+    {
+      method: "POST",
+      json: body,
+    },
+  );
 }

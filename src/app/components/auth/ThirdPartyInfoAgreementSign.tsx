@@ -78,8 +78,8 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
     getInvitationPreview(invite)
       .then((data) => {
         if (data.contract_agreed_at) {
-          // 이미 동의한 경우 회원가입 페이지로 리다이렉트
-          router.push(`/signup/${encodeURIComponent(invite)}/register`);
+          // DB에 동의 시각이 있으면 동의서 화면 생략 → 정보 입력으로
+          router.replace(`/signup/${encodeURIComponent(invite)}/register`);
         } else {
           setIsLoading(false);
         }

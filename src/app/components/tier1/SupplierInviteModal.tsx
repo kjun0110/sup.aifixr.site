@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   X,
   Mail,
@@ -16,6 +16,31 @@ import {
   Check,
   Ban
 } from "lucide-react";
+import { toast } from "sonner";
+import {
+  getInvitationAttachmentDataContractRevision,
+  getInvitationHistory,
+  postSupInvitation,
+  type InvitationAttachmentContractRevision,
+  type InvitationHistoryItem,
+} from "@/lib/api/invitation";
+import { approveSignupRequest, rejectSignupRequest } from "@/lib/api/signup-review";
+import { startSupGoogleLinkFlow } from "@/lib/api/supGoogleLink";
+
+const SUPPLIER_INVITE_DEFAULT_BODY = `안녕하세요.
+
+귀사는 우리회사의 직하위 협력사로,
+공급망 탄소데이터 및 PCF 산정을 위해 AIFIX 시스템 등록이 필요합니다.
+
+아래 링크를 통해 회원가입을 진행해 주시기 바랍니다.
+
+https://aifixr.site/signup
+
+(발송 시 수신자별 보안 링크로 치환됩니다.)
+
+회원가입 시 제3자 제공 동의서 동의가 필요하며, 메일에 PDF가 첨부됩니다.
+
+감사합니다.`;
 
 type InviteRecord = {
   id: string;
@@ -23,21 +48,79 @@ type InviteRecord = {
   email: string;
   sentAt: string;
   status: "invited" | "contract_signed" | "registered" | "pending_approval" | "connected";
+  signupRequestId?: number;
 };
 
-export function SupplierInviteModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+export type SupplierInviteContext = {
+  projectId: number;
+  parentNodeId: number | null;
+};
+
+function mapApiRowToRecord(r: InvitationHistoryItem): InviteRecord {
+  const pendingId = r.pending_signup_request_id;
+  const legacyPending =
+    pendingId == null &&
+    r.status === "in_progress" &&
+    r.last_signup_request_id != null &&
+    r.last_signup_request_id > 0;
+  const signupRequestId =
+    pendingId != null && pendingId > 0
+      ? pendingId
+      : legacyPending
+        ? (r.last_signup_request_id as number)
+        : undefined;
+
+  let status: InviteRecord["status"] = "invited";
+  if (signupRequestId != null) {
+    // DB에 승인 대기 신청이 있으면 초대 status가 completed여도 승인/반려 우선
+    status = "pending_approval";
+  } else if (r.status === "completed") status = "connected";
+  else if (r.status === "sent") status = "invited";
+  else if (r.status === "in_progress") status = "contract_signed";
+  else if (r.status === "revoked" || r.status === "expired") status = "invited";
+
+  return {
+    id: String(r.id),
+    companyName: r.invitee_company_hint || "-",
+    email: r.invitee_email || "-",
+    sentAt: new Date(r.created_at).toLocaleString(),
+    status,
+    signupRequestId,
+  };
+}
+
+export function SupplierInviteModal({
+  isOpen,
+  onClose,
+  inviteContext,
+  fetchRegisteredChildren,
+  childrenReloadToken = 0,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  /** 실제 프로젝트(real-*)에서만 전달 — 공급망 노드 기준 초대·이력 API 연동 */
+  inviteContext?: SupplierInviteContext | null;
+  /** added 직하위 목록 (프로젝트별) */
+  fetchRegisteredChildren?: () => Promise<{ id: number; company_name: string }[]>;
+  /** 직하위 등록 후 목록 갱신용 */
+  childrenReloadToken?: number;
+}) {
   type RecipientDraft = {
     id: string;
     companyName: string;
     contactName: string;
     contactEmail: string;
+    childSupplyChainNodeId?: number | null;
   };
 
   const [recipients, setRecipients] = useState<RecipientDraft[]>([
-    { id: 'r-1', companyName: '', contactName: '', contactEmail: '' },
+    { id: 'r-1', companyName: '', contactName: '', contactEmail: '', childSupplyChainNodeId: null },
   ]);
-  const [selectedContract, setSelectedContract] = useState("v2.0");
-  const [inviteRecords, setInviteRecords] = useState<InviteRecord[]>([
+  const [attachmentRevision, setAttachmentRevision] =
+    useState<InvitationAttachmentContractRevision | null>(null);
+  const [attachmentRevisionLoading, setAttachmentRevisionLoading] = useState(false);
+  const [attachmentRevisionError, setAttachmentRevisionError] = useState<string | null>(null);
+  const initialMockRecords: InviteRecord[] = [
     {
       id: "1",
       companyName: "에코솔루션",
@@ -73,25 +156,150 @@ export function SupplierInviteModal({ isOpen, onClose }: { isOpen: boolean; onCl
       sentAt: "2026-02-28 11:00",
       status: "invited"
     },
-  ]);
+  ];
 
-  const handleApprove = (recordId: string) => {
-    setInviteRecords(prev => 
-      prev.map(record => 
-        record.id === recordId 
-          ? { ...record, status: "connected" as const }
-          : record
-      )
+  const useLiveApi = Boolean(
+    inviteContext?.projectId != null && inviteContext.parentNodeId != null,
+  );
+
+  const [registeredOptions, setRegisteredOptions] = useState<{ id: number; company_name: string }[]>(
+    [],
+  );
+  const [registeredLoading, setRegisteredLoading] = useState(false);
+
+  /** 실제 API 모드에서는 빈 배열로 시작 — 목(mock)이 API 실패 시 그대로 남는 문제 방지 */
+  const [inviteRecords, setInviteRecords] = useState<InviteRecord[]>([]);
+  const [emailSubject, setEmailSubject] = useState("[AIFIX] 공급망 데이터 등록 요청");
+  const [emailBody, setEmailBody] = useState(SUPPLIER_INVITE_DEFAULT_BODY);
+
+  const reloadHistory = useCallback(async () => {
+    if (!inviteContext?.projectId || inviteContext.parentNodeId == null) return;
+    try {
+      const rows = await getInvitationHistory({ limit: 80 });
+      const filtered = rows.filter(
+        (row) =>
+          row.project_id === inviteContext.projectId &&
+          row.parent_supply_chain_node_id === inviteContext.parentNodeId,
+      );
+      setInviteRecords(filtered.map(mapApiRowToRecord));
+    } catch (e) {
+      setInviteRecords([]);
+      toast.error(
+        e instanceof Error ? e.message : "발송 기록을 불러오지 못했습니다.",
+      );
+    }
+  }, [inviteContext?.projectId, inviteContext?.parentNodeId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!useLiveApi) {
+      setInviteRecords(initialMockRecords);
+      return;
+    }
+    void reloadHistory();
+  }, [isOpen, useLiveApi, reloadHistory]);
+
+  useEffect(() => {
+    if (!isOpen || !useLiveApi) {
+      setAttachmentRevision(null);
+      setAttachmentRevisionError(null);
+      setAttachmentRevisionLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setAttachmentRevisionLoading(true);
+    setAttachmentRevisionError(null);
+    void (async () => {
+      try {
+        const rev = await getInvitationAttachmentDataContractRevision();
+        if (!cancelled) {
+          setAttachmentRevision(rev);
+          setAttachmentRevisionError(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setAttachmentRevision(null);
+          setAttachmentRevisionError(
+            e instanceof Error ? e.message : "첨부 동의서 정보를 불러오지 못했습니다.",
+          );
+        }
+      } finally {
+        if (!cancelled) setAttachmentRevisionLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, useLiveApi]);
+
+  useEffect(() => {
+    if (!isOpen || !useLiveApi || !fetchRegisteredChildren) {
+      setRegisteredOptions([]);
+      return;
+    }
+    let cancelled = false;
+    setRegisteredLoading(true);
+    void (async () => {
+      try {
+        const rows = await fetchRegisteredChildren();
+        if (!cancelled) setRegisteredOptions(rows ?? []);
+      } catch (e) {
+        if (!cancelled) {
+          setRegisteredOptions([]);
+          toast.error(
+            e instanceof Error ? e.message : "등록된 직하위 목록을 불러오지 못했습니다.",
+          );
+        }
+      } finally {
+        if (!cancelled) setRegisteredLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, useLiveApi, fetchRegisteredChildren, childrenReloadToken]);
+
+  const handleApprove = async (record: InviteRecord) => {
+    if (useLiveApi) {
+      if (!record.signupRequestId) {
+        toast.message("가입 신청이 접수된 뒤 승인할 수 있습니다.");
+        return;
+      }
+      try {
+        await approveSignupRequest(record.signupRequestId);
+        toast.success("프로젝트 진입을 승인했습니다.");
+        await reloadHistory();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "승인 처리에 실패했습니다.");
+      }
+      return;
+    }
+    setInviteRecords((prev) =>
+      prev.map((r) =>
+        r.id === record.id ? { ...r, status: "connected" as const } : r,
+      ),
     );
   };
 
-  const handleReject = (recordId: string) => {
-    setInviteRecords(prev => 
-      prev.map(record => 
-        record.id === recordId 
-          ? { ...record, status: "invited" as const }
-          : record
-      )
+  const handleReject = async (record: InviteRecord) => {
+    if (useLiveApi) {
+      if (!record.signupRequestId) {
+        toast.message("가입 신청이 접수된 뒤 반려할 수 있습니다.");
+        return;
+      }
+      try {
+        await rejectSignupRequest(record.signupRequestId);
+        toast.success("반려 처리했습니다.");
+        await reloadHistory();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "반려 처리에 실패했습니다.");
+      }
+      return;
+    }
+    setInviteRecords((prev) =>
+      prev.map((r) =>
+        r.id === record.id ? { ...r, status: "invited" as const } : r,
+      ),
     );
   };
 
@@ -104,7 +312,7 @@ export function SupplierInviteModal({ isOpen, onClose }: { isOpen: boolean; onCl
   const addRecipient = () => {
     setRecipients((prev) => [
       ...prev,
-      { id: createId(), companyName: '', contactName: '', contactEmail: '' },
+      { id: createId(), companyName: '', contactName: '', contactEmail: '', childSupplyChainNodeId: null },
     ]);
   };
 
@@ -112,11 +320,13 @@ export function SupplierInviteModal({ isOpen, onClose }: { isOpen: boolean; onCl
     setRecipients((prev) => {
       const next = prev.filter((r) => r.id !== id);
       // 첫 발신인 카드(r-1) 삭제 버튼은 숨기지만, 혹시 모를 상태를 대비해 최소 1개는 유지
-      return next.length > 0 ? next : [{ id: 'r-1', companyName: '', contactName: '', contactEmail: '' }];
+      return next.length > 0
+        ? next
+        : [{ id: 'r-1', companyName: '', contactName: '', contactEmail: '', childSupplyChainNodeId: null }];
     });
   };
 
-  const handleSendInvites = () => {
+  const handleSendInvites = async () => {
     const filled = recipients
       .map((r) => ({
         ...r,
@@ -127,47 +337,92 @@ export function SupplierInviteModal({ isOpen, onClose }: { isOpen: boolean; onCl
       .filter((r) => r.companyName || r.contactName || r.contactEmail);
 
     if (filled.length === 0) {
-      alert('발신인(협력사) 정보를 입력해주세요.');
+      toast.error("발신인(협력사) 정보를 입력해주세요.");
       return;
     }
 
     const invalid = filled.find((r) => !r.companyName || !r.contactName || !r.contactEmail);
     if (invalid) {
-      alert('모든 발신인(협력사) 항목의 회사명/담당자 이름/담당자 이메일을 입력해주세요.');
+      toast.error(
+        "모든 발신인 항목의 회사명·담당자 이름·담당자 이메일을 입력해주세요.",
+      );
       return;
     }
 
-    const now = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    if (useLiveApi && inviteContext?.parentNodeId != null) {
+      const missingChild = filled.find(
+        (r) => r.childSupplyChainNodeId == null || r.childSupplyChainNodeId < 1,
+      );
+      if (missingChild) {
+        toast.error("각 수신인마다 직하위 등록 목록에서 협력사를 선택해 주세요.");
+        return;
+      }
+      const bodyForBackend = emailBody.trim().replace(/https?:\/\/[^\s]+/g, "{link}");
+      let ok = 0;
+      for (const r of filled) {
+        try {
+          await postSupInvitation({
+            parent_supply_chain_node_id: inviteContext.parentNodeId,
+            child_supply_chain_node_id: r.childSupplyChainNodeId ?? undefined,
+            invitee: {
+              company_name: r.companyName,
+              contact_name: r.contactName,
+              email: r.contactEmail,
+            },
+            expire_days: 7,
+            email_subject: emailSubject.trim(),
+            email_body: bodyForBackend,
+          });
+          ok += 1;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "발송 실패";
+          if (msg.includes("428") || msg.toLowerCase().includes("gmail")) {
+            toast.message(
+              "초대 메일은 연동된 Google 계정(Gmail)으로 발송됩니다. Google 연동 화면으로 이동합니다.",
+            );
+            try {
+              await startSupGoogleLinkFlow({ reopenInviteModal: true });
+            } catch (e2) {
+              toast.error(
+                e2 instanceof Error ? e2.message : "Google 연동을 시작할 수 없습니다.",
+              );
+            }
+            return;
+          }
+          toast.error(msg);
+        }
+      }
+      if (ok > 0) {
+        toast.success(`${ok}건 초대 메일을 발송했습니다.`);
+        setRecipients([
+          { id: "r-1", companyName: "", contactName: "", contactEmail: "", childSupplyChainNodeId: null },
+        ]);
+        await reloadHistory();
+      }
+      return;
+    }
+
+    if (inviteContext?.projectId != null && inviteContext.parentNodeId == null) {
+      toast.error(
+        "공급망에서 승인된 내 노드가 없어 초대를 보낼 수 없습니다. 원청 승인 후 다시 시도해 주세요.",
+      );
+      return;
+    }
+
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const newRecords: InviteRecord[] = filled.map((r, idx) => ({
       id: `inv-${Date.now()}-${idx}`,
       companyName: r.companyName,
       email: r.contactEmail,
       sentAt: now,
-      status: 'invited',
+      status: "invited",
     }));
 
     setInviteRecords((prev) => [...newRecords, ...prev]);
-    setRecipients([{ id: 'r-1', companyName: '', contactName: '', contactEmail: '' }]);
+    setRecipients([
+      { id: "r-1", companyName: "", contactName: "", contactEmail: "", childSupplyChainNodeId: null },
+    ]);
   };
-
-  const defaultEmailBody = `안녕하세요.
-
-귀사는 우리회사(1차)에 납품하는 협력사로,
-해당 납품 제품은 현대자동차 공급망에 포함되어 있습니다.
-
-공급망 탄소데이터 및 PCF 산정을 위해
-AIFIX 시스템 등록이 필요합니다.
-
-아래 링크를 통해 회원가입을 진행해 주시기 바랍니다.
-
-https://aifixr.site/signup
-
-(발송 시 수신자별 보안 토큰이 자동으로 첨부됩니다.)
-
-회원가입 시 DATA CONTRACT 동의가 필요하며,
-관련 문서는 아래 첨부파일에서 확인하실 수 있습니다.
-
-감사합니다.`;
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -240,6 +495,24 @@ https://aifixr.site/signup
             <p style={{ fontSize: '14px', color: 'var(--aifix-gray)' }}>
               직접 하위 협력사에게 AIFIX 시스템 등록 안내 메일을 발송합니다
             </p>
+            {inviteContext?.projectId != null && inviteContext.parentNodeId == null && (
+              <p
+                className="mt-2 text-sm rounded-lg px-3 py-2"
+                style={{ backgroundColor: "#FFF4E6", color: "#E65100" }}
+              >
+                이 프로젝트에서 승인된 공급망 노드가 없어 실제 초대 메일을 보낼 수 없습니다. 원청
+                승인(공급망 노드 활성화) 후 다시 시도해 주세요.
+              </p>
+            )}
+            {useLiveApi && fetchRegisteredChildren && !registeredLoading && registeredOptions.length === 0 && (
+              <p
+                className="mt-2 text-sm rounded-lg px-3 py-2"
+                style={{ backgroundColor: "#E3F2FD", color: "#1565C0" }}
+              >
+                직하위로 등록된 협력사가 없습니다. 공급망 관리에서「직하위차사 등록」으로 먼저 등록한 뒤
+                초대해 주세요.
+              </p>
+            )}
           </div>
           <button
             onClick={onClose}
@@ -314,19 +587,51 @@ https://aifixr.site/signup
                       >
                         협력사 회사명 *
                       </label>
-                      <div className="relative">
-                        <Building2
-                          className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4"
-                          style={{ color: 'var(--aifix-gray)' }}
-                        />
-                        <input
-                          type="text"
-                          value={r.companyName}
-                          onChange={(e) => updateRecipient(r.id, { companyName: e.target.value })}
-                          placeholder="예: 세진케미칼"
-                          className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-gray-300 text-sm transition-all focus:border-[var(--aifix-primary)] focus:outline-none"
-                        />
-                      </div>
+                      {useLiveApi && fetchRegisteredChildren ? (
+                        <div className="relative">
+                          <Building2
+                            className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 z-[1] pointer-events-none"
+                            style={{ color: 'var(--aifix-gray)' }}
+                          />
+                          <select
+                            value={r.childSupplyChainNodeId != null ? String(r.childSupplyChainNodeId) : ''}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              const nid = v ? Number(v) : null;
+                              const opt = registeredOptions.find((o) => o.id === nid);
+                              updateRecipient(r.id, {
+                                childSupplyChainNodeId: nid,
+                                companyName: opt?.company_name ?? '',
+                              });
+                            }}
+                            disabled={registeredLoading}
+                            className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-gray-300 text-sm transition-all focus:border-[var(--aifix-primary)] focus:outline-none bg-white appearance-none"
+                          >
+                            <option value="">
+                              {registeredLoading ? '목록 불러오는 중…' : '등록된 직하위 협력사 선택'}
+                            </option>
+                            {registeredOptions.map((o) => (
+                              <option key={o.id} value={o.id}>
+                                {o.company_name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : (
+                        <div className="relative">
+                          <Building2
+                            className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4"
+                            style={{ color: 'var(--aifix-gray)' }}
+                          />
+                          <input
+                            type="text"
+                            value={r.companyName}
+                            onChange={(e) => updateRecipient(r.id, { companyName: e.target.value })}
+                            placeholder="예: 세진케미칼"
+                            className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-gray-300 text-sm transition-all focus:border-[var(--aifix-primary)] focus:outline-none"
+                          />
+                        </div>
+                      )}
                     </div>
 
                     <div>
@@ -398,7 +703,8 @@ https://aifixr.site/signup
               </label>
               <input
                 type="text"
-                defaultValue="[AIFIX] 공급망 데이터 등록 요청"
+                value={emailSubject}
+                onChange={(e) => setEmailSubject(e.target.value)}
                 className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm transition-all focus:border-[var(--aifix-primary)] focus:outline-none"
               />
             </div>
@@ -411,8 +717,9 @@ https://aifixr.site/signup
               <textarea
                 className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm transition-all focus:border-[var(--aifix-primary)] focus:outline-none"
                 rows={12}
-                defaultValue={defaultEmailBody}
-                style={{ resize: 'none', lineHeight: 1.6 }}
+                value={emailBody}
+                onChange={(e) => setEmailBody(e.target.value)}
+                style={{ resize: "none", lineHeight: 1.6 }}
               />
             </div>
 
@@ -429,20 +736,45 @@ https://aifixr.site/signup
                   </span>
                 </div>
               </div>
-              
-              <select 
-                value={selectedContract}
-                onChange={(e) => setSelectedContract(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm"
-                style={{ outline: 'none' }}
-              >
-                <option value="v2.0">v2.0 (2026.01)</option>
-                <option value="v1.9">v1.9 (2025.12)</option>
-                <option value="v1.8">v1.8 (2025.11)</option>
-              </select>
+
+              {useLiveApi ? (
+                <div
+                  className="w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white text-sm"
+                  style={{ color: 'var(--aifix-navy)' }}
+                >
+                  {attachmentRevisionLoading ? (
+                    <span className="text-gray-500">불러오는 중…</span>
+                  ) : attachmentRevision ? (
+                    <>
+                      <span style={{ fontWeight: 700 }}>{attachmentRevision.version_code}</span>
+                      {attachmentRevision.title ? (
+                        <span className="text-gray-600"> · {attachmentRevision.title}</span>
+                      ) : null}
+                      <div className="mt-1 text-xs text-gray-500">
+                        시행일{" "}
+                        {new Date(attachmentRevision.effective_from).toLocaleDateString("ko-KR", {
+                          year: "numeric",
+                          month: "long",
+                          day: "numeric",
+                        })}
+                      </div>
+                    </>
+                  ) : (
+                    <span className="text-amber-700">{attachmentRevisionError ?? "정보 없음"}</span>
+                  )}
+                </div>
+              ) : (
+                <div
+                  className="w-full px-3 py-2.5 rounded-lg border border-dashed border-gray-300 text-sm text-gray-500"
+                >
+                  데모 화면입니다. 연동 시 서버에 등록된 활성 DATA CONTRACT가 첨부됩니다.
+                </div>
+              )}
 
               <p style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginTop: '8px' }}>
-                선택한 버전의 DATA CONTRACT PDF가 자동으로 첨부됩니다
+                {useLiveApi
+                  ? "위 내용은 초대 메일에 실제로 붙는 PDF와 동일한 개정입니다. 메일은 연동된 Gmail로 발송되며, 미연동 시「초대 메일 발송」을 누르면 Google 연동으로 안내됩니다."
+                  : "실제 서비스에서는 서버의 활성 DATA CONTRACT PDF가 자동 첨부됩니다."}
               </p>
             </div>
 
@@ -514,7 +846,7 @@ https://aifixr.site/signup
                           <span style={{ fontWeight: 600 }}>승인대기</span>
                         </div>
                         <button
-                          onClick={() => handleApprove(record.id)}
+                          onClick={() => void handleApprove(record)}
                           className="flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all hover:scale-105"
                           style={{
                             backgroundColor: '#2196F3',
@@ -527,42 +859,7 @@ https://aifixr.site/signup
                           승인
                         </button>
                         <button
-                          onClick={() => handleReject(record.id)}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all hover:scale-105"
-                          style={{
-                            backgroundColor: '#F44336',
-                            color: 'white',
-                            fontSize: '12px',
-                            fontWeight: 600
-                          }}
-                        >
-                          <Ban className="w-3 h-3" />
-                          반려
-                        </button>
-                      </div>
-                    )}
-
-                    {/* 프로젝트 진입 승인 버튼 - contract_signed, registered 상태일 때도 표시 */}
-                    {(record.status === "contract_signed" || record.status === "registered") && (
-                      <div className="flex items-center gap-2 pt-3 border-t" style={{ borderColor: '#E0E0E0' }}>
-                        <div className="text-xs flex-1" style={{ color: 'var(--aifix-gray)' }}>
-                          프로젝트 진입 승인
-                        </div>
-                        <button
-                          onClick={() => handleApprove(record.id)}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all hover:scale-105"
-                          style={{
-                            backgroundColor: '#2196F3',
-                            color: 'white',
-                            fontSize: '12px',
-                            fontWeight: 600
-                          }}
-                        >
-                          <Check className="w-3 h-3" />
-                          승인
-                        </button>
-                        <button
-                          onClick={() => handleReject(record.id)}
+                          onClick={() => void handleReject(record)}
                           className="flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all hover:scale-105"
                           style={{
                             backgroundColor: '#F44336',

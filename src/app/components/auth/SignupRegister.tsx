@@ -158,6 +158,9 @@ export function SignupRegister({ invite }: { invite?: string }) {
         if (data.invitee_email) {
           setInvitedEmail(data.invitee_email);
         }
+        if (data.invitee_business_registration_hint) {
+          setCompanyRegNumber(data.invitee_business_registration_hint);
+        }
       })
       .catch((error) => {
         console.error('초대 정보 조회 실패:', error);

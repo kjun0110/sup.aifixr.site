@@ -80,6 +80,7 @@ export class SupLoginFailedError extends Error {
   constructor(message = "이메일 또는 비밀번호가 올바르지 않습니다.") {
     super(message);
     this.name = "SupLoginFailedError";
+    Object.setPrototypeOf(this, SupLoginFailedError.prototype);
   }
 }
 

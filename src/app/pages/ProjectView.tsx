@@ -16,6 +16,8 @@ import { NonTier1PCFSubmit } from "../components/non-tier1/NonTier1PCFSubmit";
 import { NonTier1Transmission } from "../components/non-tier1/NonTier1Transmission";
 import { NonTier1History } from "../components/non-tier1/NonTier1History";
 import { getMyProjectDetail, SupplierProject } from "../../lib/api/supply-chain";
+import { setSupAccessToken } from "../../lib/api/sessionAccessToken";
+import { actorStorageKey } from "../../lib/api/client";
 import { 
   TrendingUp, 
   AlertCircle, 
@@ -86,8 +88,13 @@ export function ProjectView() {
         })
         .catch((error) => {
           console.error("프로젝트 상세 조회 실패:", error);
-          if (error.message?.includes("401")) {
-            localStorage.clear();
+          if (error instanceof Error && error.message.includes("401")) {
+            setSupAccessToken(null);
+            try {
+              localStorage.removeItem(actorStorageKey());
+            } catch {
+              /* ignore */
+            }
             router.push("/");
           }
         })
@@ -127,8 +134,20 @@ export function ProjectView() {
           : <NonTier1Dashboard tier={currentTier} />;
       
       case "supply-chain":
-        // 공급망 관리 화면 - 모든 차수 공통
-        return <SupplyChainManagement tier={currentTier} />;
+        // 공급망 관리 화면 - 모든 차수 공통 (실제 프로젝트는 API에서 온 노드 ID로 하위 초대 연동)
+        return (
+          <SupplyChainManagement
+            tier={currentTier}
+            inviteContext={
+              project?.project_id != null
+                ? {
+                    projectId: project.project_id,
+                    parentNodeId: project.my_supply_chain_node_id ?? null,
+                  }
+                : null
+            }
+          />
+        );
       
       case "data-mgmt":
         // 통합된 데이터 관리 화면 - 모든 차수 공통

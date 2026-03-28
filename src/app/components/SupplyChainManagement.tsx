@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { 
   Search, 
   ChevronRight, 
@@ -18,7 +19,11 @@ import {
   FileText,
   User
 } from "lucide-react";
-import { SupplierInviteModal } from "./shared/SupplierInviteModal";
+import {
+  SupplierInviteModal,
+  type SupplierInviteContext,
+} from "./shared/SupplierInviteModal";
+import { getRegisteredDirectChildren, postRegisterDirectChild } from "../../lib/api/supply-chain";
 
 type CompanyNode = {
   id: string;
@@ -71,14 +76,22 @@ const MOCK_COMPANY_DIRECTORY: CompanyDirectoryItem[] = [
   { id: "tier4-1", name: "켐텍소재", tier: "tier4", taxId: "410-01-11111" },
 ];
 
-export function SupplyChainManagement({ tier }: { tier: "tier1" | "tier2" | "tier3" }) {
+export function SupplyChainManagement({
+  tier,
+  inviteContext,
+}: {
+  tier: "tier1" | "tier2" | "tier3";
+  inviteContext?: SupplierInviteContext | null;
+}) {
   const params = useParams();
+  const searchParams = useSearchParams();
   const projectId = typeof params.projectId === "string" ? params.projectId : params.projectId?.[0];
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set(["root", "tier1-1", "tier2-1", "tier3-1"]));
   const [activeFilter, setActiveFilter] = useState<string>("all");
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const router = useRouter();
 
   // 직하위차사 등록 모달
   const [showRegisterDirectChildModal, setShowRegisterDirectChildModal] = useState(false);
@@ -88,6 +101,13 @@ export function SupplyChainManagement({ tier }: { tier: "tier1" | "tier2" | "tie
   const [companyDropdownOpen, setCompanyDropdownOpen] = useState(false);
   const [extraCompanies, setExtraCompanies] = useState<Company[]>([]);
   const [extraTreeChildren, setExtraTreeChildren] = useState<CompanyNode[]>([]);
+  const [registeredChildrenTick, setRegisteredChildrenTick] = useState(0);
+  const [registerSubmitting, setRegisterSubmitting] = useState(false);
+
+  const fetchRegisteredChildren = useCallback(async () => {
+    if (inviteContext?.projectId == null) return [];
+    return getRegisteredDirectChildren(inviteContext.projectId);
+  }, [inviteContext?.projectId]);
 
   type DataRequestStatus = 'NOT_REQUESTED' | 'REQUESTED' | 'SUBMITTED';
   const LS_REQUEST_STATUS_KEY = 'aifix_mock_data_request_status_by_target_v1';
@@ -118,6 +138,22 @@ export function SupplyChainManagement({ tier }: { tier: "tier1" | "tier2" | "tie
       // ignore (mock)
     }
   }, [LS_REQUEST_STATUS_KEY, requestStatusById]);
+
+  /** Google Gmail 연동 후 복귀 시 초대 모달 다시 열기 */
+  useEffect(() => {
+    if (searchParams.get("openSupplierInvite") !== "1") return;
+    setShowInviteModal(true);
+    const sp = new URLSearchParams(searchParams.toString());
+    sp.delete("openSupplierInvite");
+    const qs = sp.toString();
+    const path =
+      typeof window !== "undefined"
+        ? window.location.pathname
+        : projectId
+          ? `/projects/${projectId}`
+          : "/projects";
+    router.replace(path + (qs ? `?${qs}` : ""));
+  }, [searchParams, router, projectId]);
 
   const currentTierNum = tier === 'tier1' ? 1 : tier === 'tier2' ? 2 : 3;
 
@@ -954,49 +990,85 @@ export function SupplyChainManagement({ tier }: { tier: "tier1" | "tier2" | "tie
           setCompanyDropdownOpen(false);
         };
 
+        const liveProjectId = inviteContext?.projectId;
+        const liveParentNodeId = inviteContext?.parentNodeId;
+        const isLiveRegister = liveProjectId != null && liveParentNodeId != null;
+
         const handleRegister = () => {
-          if (!selectedRegisterCompany) {
-            alert("회사명을 선택해주세요.");
-            return;
-          }
-          const biz = registerBusinessNumber.trim();
-          if (!biz) {
-            alert("사업자등록번호를 입력해주세요.");
-            return;
-          }
+          void (async () => {
+            const biz = registerBusinessNumber.trim();
+            const nameForLive = (selectedRegisterCompany?.name ?? companyQuery).trim();
 
-          const exists = allCompanies.some((c) => c.name === selectedRegisterCompany.name);
-          if (exists) {
-            alert("이미 등록된 회사입니다.");
-            return;
-          }
+            if (isLiveRegister && liveProjectId != null) {
+              if (!nameForLive) {
+                toast.error("회사명을 입력해 주세요.");
+                return;
+              }
+              if (!biz) {
+                toast.error("사업자등록번호를 입력해 주세요.");
+                return;
+              }
+              setRegisterSubmitting(true);
+              try {
+                await postRegisterDirectChild(liveProjectId, {
+                  company_name: nameForLive,
+                  business_registration_number: biz,
+                });
+                close();
+                toast.success("등록되었습니다", {
+                  description: "직하위 협력사가 추가되었습니다.",
+                });
+                setRegisteredChildrenTick((t) => t + 1);
+              } catch (e) {
+                toast.error(e instanceof Error ? e.message : "등록에 실패했습니다.");
+              } finally {
+                setRegisterSubmitting(false);
+              }
+              return;
+            }
 
-          const nowId = `direct-${Date.now()}`;
-          const nextTreeNode: CompanyNode = {
-            id: nowId,
-            name: selectedRegisterCompany.name,
-            tier: directChildTier,
-            status: "pending",
-            parentId: "root",
-          };
+            if (!selectedRegisterCompany) {
+              toast.error("회사명을 선택해 주세요.");
+              return;
+            }
+            if (!biz) {
+              toast.error("사업자등록번호를 입력해 주세요.");
+              return;
+            }
 
-          setExtraTreeChildren((prev) => [...prev, nextTreeNode]);
-          setExtraCompanies((prev) => [
-            ...prev,
-            {
+            const exists = allCompanies.some((c) => c.name === selectedRegisterCompany.name);
+            if (exists) {
+              toast.error("이미 등록된 회사입니다.");
+              return;
+            }
+
+            const nowId = `direct-${Date.now()}`;
+            const nextTreeNode: CompanyNode = {
               id: nowId,
               name: selectedRegisterCompany.name,
-              tier: directChildTierLabel,
-              status: "미제출",
-              lastSubmit: "-",
-              dueDate: "2026-03-10",
-              daysLeft: 6,
-              revisionRequested: false,
-            },
-          ]);
+              tier: directChildTier,
+              status: "pending",
+              parentId: "root",
+            };
 
-          alert("직하위 협력사가 등록되었습니다.");
-          close();
+            setExtraTreeChildren((prev) => [...prev, nextTreeNode]);
+            setExtraCompanies((prev) => [
+              ...prev,
+              {
+                id: nowId,
+                name: selectedRegisterCompany.name,
+                tier: directChildTierLabel,
+                status: "미제출",
+                lastSubmit: "-",
+                dueDate: "2026-03-10",
+                daysLeft: 6,
+                revisionRequested: false,
+              },
+            ]);
+
+            alert("직하위 협력사가 등록되었습니다.");
+            close();
+          })();
         };
 
         return (
@@ -1032,54 +1104,72 @@ export function SupplyChainManagement({ tier }: { tier: "tier1" | "tier2" | "tie
                     <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
                       1. 회사명
                     </div>
-                    <div className="relative">
-                      <Search
-                        className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4"
-                        style={{ color: "var(--aifix-gray)" }}
-                      />
-                      <input
-                        value={companyQuery}
-                        onChange={(e) => {
-                          setCompanyQuery(e.target.value);
-                          setCompanyDropdownOpen(true);
-                          setSelectedRegisterCompany(null);
-                          setRegisterBusinessNumber("");
-                        }}
-                        onFocus={() => setCompanyDropdownOpen(true)}
-                        placeholder="회사명 검색"
-                        className="w-full rounded-[16px] border border-gray-200 p-3 pl-10 text-sm"
-                        style={{ outline: "none" }}
-                      />
+                    {isLiveRegister ? (
+                      <div>
+                        <input
+                          value={companyQuery}
+                          onChange={(e) => {
+                            setCompanyQuery(e.target.value);
+                            setSelectedRegisterCompany(null);
+                          }}
+                          placeholder="정식 회사명 (초대 시 선택 목록과 동일해야 합니다)"
+                          className="w-full rounded-[16px] border border-gray-200 p-3 text-sm"
+                          style={{ outline: "none" }}
+                        />
+                        <p className="mt-2 text-xs" style={{ color: "var(--aifix-gray)" }}>
+                          이후「하위 협력사 초대」에서 동일한 이름으로 선택·발송합니다.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <Search
+                          className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4"
+                          style={{ color: "var(--aifix-gray)" }}
+                        />
+                        <input
+                          value={companyQuery}
+                          onChange={(e) => {
+                            setCompanyQuery(e.target.value);
+                            setCompanyDropdownOpen(true);
+                            setSelectedRegisterCompany(null);
+                            setRegisterBusinessNumber("");
+                          }}
+                          onFocus={() => setCompanyDropdownOpen(true)}
+                          placeholder="회사명 검색"
+                          className="w-full rounded-[16px] border border-gray-200 p-3 pl-10 text-sm"
+                          style={{ outline: "none" }}
+                        />
 
-                      {companyDropdownOpen && candidates.length > 0 && (
-                        <div
-                          className="absolute z-10 mt-2 w-full rounded-[16px] border border-gray-200 bg-white shadow-lg overflow-hidden"
-                        >
-                          {candidates.map((c) => (
-                            <button
-                              key={c.id}
-                              type="button"
-                              onClick={() => {
-                                setSelectedRegisterCompany(c);
-                                setCompanyQuery(c.name);
-                                setRegisterBusinessNumber(c.taxId);
-                                setCompanyDropdownOpen(false);
-                              }}
-                              className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
-                              style={{ color: "var(--aifix-navy)", fontWeight: 600 }}
-                            >
-                              {c.name}
-                            </button>
-                          ))}
-                        </div>
-                      )}
+                        {companyDropdownOpen && candidates.length > 0 && (
+                          <div
+                            className="absolute z-10 mt-2 w-full rounded-[16px] border border-gray-200 bg-white shadow-lg overflow-hidden"
+                          >
+                            {candidates.map((c) => (
+                              <button
+                                key={c.id}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedRegisterCompany(c);
+                                  setCompanyQuery(c.name);
+                                  setRegisterBusinessNumber(c.taxId);
+                                  setCompanyDropdownOpen(false);
+                                }}
+                                className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
+                                style={{ color: "var(--aifix-navy)", fontWeight: 600 }}
+                              >
+                                {c.name}
+                              </button>
+                            ))}
+                          </div>
+                        )}
 
-                      {companyDropdownOpen && candidates.length === 0 && companyQuery.trim() && (
-                        <div className="absolute z-10 mt-2 w-full rounded-[16px] border border-gray-200 bg-white p-3 text-sm" style={{ color: "var(--aifix-gray)" }}>
-                          검색 결과가 없습니다.
-                        </div>
-                      )}
-                    </div>
+                        {companyDropdownOpen && candidates.length === 0 && companyQuery.trim() && (
+                          <div className="absolute z-10 mt-2 w-full rounded-[16px] border border-gray-200 bg-white p-3 text-sm" style={{ color: "var(--aifix-gray)" }}>
+                            검색 결과가 없습니다.
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -1099,18 +1189,25 @@ export function SupplyChainManagement({ tier }: { tier: "tier1" | "tier2" | "tie
 
               <div className="px-8 py-6 border-t border-gray-100 flex items-center justify-end gap-3">
                 <button
-                  className="px-6 py-3 rounded-xl transition-all"
+                  type="button"
+                  className="px-6 py-3 rounded-xl transition-all duration-150 active:scale-[0.98] hover:bg-gray-50"
                   style={{ border: "1px solid var(--aifix-gray)", color: "var(--aifix-gray)", fontWeight: 700 }}
                   onClick={close}
+                  disabled={registerSubmitting}
                 >
                   취소
                 </button>
                 <button
-                  className="px-6 py-3 rounded-xl transition-all text-white"
-                  style={{ background: "linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)", fontWeight: 800 }}
+                  type="button"
+                  disabled={registerSubmitting}
                   onClick={handleRegister}
+                  className="px-6 py-3 rounded-xl text-white font-extrabold shadow-md transition-all duration-150 select-none enabled:hover:brightness-105 enabled:active:scale-[0.96] enabled:active:shadow-inner enabled:active:brightness-95 disabled:opacity-55 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#5B3BFA]"
+                  style={{
+                    background: "linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)",
+                    boxShadow: "0 4px 14px rgba(91, 59, 250, 0.35)",
+                  }}
                 >
-                  등록하기
+                  {registerSubmitting ? "등록 중…" : "등록하기"}
                 </button>
               </div>
             </div>
@@ -1122,6 +1219,11 @@ export function SupplyChainManagement({ tier }: { tier: "tier1" | "tier2" | "tie
       <SupplierInviteModal
         isOpen={showInviteModal}
         onClose={() => setShowInviteModal(false)}
+        inviteContext={inviteContext ?? null}
+        fetchRegisteredChildren={
+          inviteContext?.projectId != null ? fetchRegisteredChildren : undefined
+        }
+        childrenReloadToken={registeredChildrenTick}
       />
     </div>
   );

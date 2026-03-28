@@ -6,7 +6,7 @@ import { restoreSupSessionFromCookie, AIFIXR_SESSION_UPDATED_EVENT } from '@/lib
 
 /**
  * 새로고침 후 HttpOnly 리프레시 쿠키로 액세스 토큰·actor 를 복구합니다.
- * 로그인 전(/)에서는 쿠키가 없어 refresh 가 항상 401 이므로 호출하지 않습니다.
+ * 로그인 전·초대 가입(/signup/...)에서는 쿠키가 없어 refresh 가 401이 되므로 호출하지 않습니다.
  */
 export default function SupSessionRestore() {
   const pathname = usePathname();
@@ -14,7 +14,11 @@ export default function SupSessionRestore() {
   const ran = useRef(false);
 
   useEffect(() => {
-    if (pathname === '/' || pathname === '') {
+    if (
+      pathname === '/' ||
+      pathname === '' ||
+      pathname.startsWith('/signup')
+    ) {
       ran.current = false;
       return;
     }

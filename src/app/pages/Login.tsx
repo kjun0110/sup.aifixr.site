@@ -6,15 +6,24 @@ import { Mail, Lock, FileText } from "lucide-react";
 import { login, SupLoginFailedError } from "@/lib/api/iam";
 import { toast } from "sonner";
 
+function isSupLoginFailed(error: unknown): error is SupLoginFailedError {
+  return (
+    error instanceof SupLoginFailedError ||
+    (error instanceof Error && error.name === "SupLoginFailedError")
+  );
+}
+
 export function Login() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+    setLoginError(null);
+
     if (!email || !password) {
       toast.error("이메일과 비밀번호를 입력해주세요");
       return;
@@ -26,11 +35,12 @@ export function Login() {
       toast.success("로그인 성공!");
       router.push("/projects");
     } catch (error) {
-      console.error("로그인 실패:", error);
-      if (error instanceof SupLoginFailedError) {
-        toast.error(error.message);
+      if (isSupLoginFailed(error)) {
+        setLoginError(error.message);
       } else {
-        toast.error(error instanceof Error ? error.message : "로그인에 실패했습니다.");
+        setLoginError(
+          error instanceof Error ? error.message : "로그인에 실패했습니다.",
+        );
       }
     } finally {
       setIsLoading(false);
@@ -171,6 +181,14 @@ export function Login() {
 
             {/* Email/Password Form */}
             <form onSubmit={handleLogin} className="space-y-4">
+              {loginError && (
+                <p
+                  role="alert"
+                  className="text-red-600 text-sm bg-red-50 border border-red-100 rounded-xl px-4 py-3"
+                >
+                  {loginError}
+                </p>
+              )}
               {/* Email */}
               <div>
                 <label 
@@ -189,7 +207,10 @@ export function Login() {
                     id="email"
                     type="email"
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    onChange={(e) => {
+                      setEmail(e.target.value);
+                      setLoginError(null);
+                    }}
                     placeholder="이메일을 입력하세요"
                     className="w-full pl-10 pr-4 py-3 rounded-xl border transition-all"
                     style={{
@@ -222,7 +243,10 @@ export function Login() {
                     id="password"
                     type="password"
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setLoginError(null);
+                    }}
                     placeholder="비밀번호를 입력하세요"
                     className="w-full pl-10 pr-4 py-3 rounded-xl border transition-all"
                     style={{

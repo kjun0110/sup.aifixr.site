@@ -15,6 +15,12 @@ export function actorStorageKey(): string {
   );
 }
 
+/** 초대 공개 API — 인증 없음. 만료된 Bearer·actor를 붙이면 401/혼선만 유발 */
+function isInvitationPublicPath(path: string): boolean {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return normalized.includes("/invitation/public/");
+}
+
 /** trailing slash 제거 */
 export function getApiBase(): string {
   return (process.env.NEXT_PUBLIC_API_BASE || "").trim().replace(/\/$/, "");
@@ -89,8 +95,10 @@ export async function apiFetch<T = unknown>(
 ): Promise<T> {
   const { json, headers: initHeaders, retryOn401 = true, ...rest } = options;
   const headers = new Headers(initHeaders);
+  const publicInvite = isInvitationPublicPath(path);
+  const effectiveRetry401 = retryOn401 && !publicInvite;
 
-  if (typeof window !== "undefined") {
+  if (typeof window !== "undefined" && !publicInvite) {
     const actor = localStorage.getItem(actorStorageKey());
     if (actor && !headers.has("X-Actor-User-Id")) {
       headers.set("X-Actor-User-Id", actor);
@@ -98,7 +106,7 @@ export async function apiFetch<T = unknown>(
   }
 
   const token = getSupAccessToken();
-  if (token && !headers.has("Authorization")) {
+  if (token && !publicInvite && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
@@ -113,7 +121,7 @@ export async function apiFetch<T = unknown>(
     body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
   });
 
-  if (res.status === 401 && retryOn401) {
+  if (res.status === 401 && effectiveRetry401) {
     const refreshed = await postSupRefresh();
     if (refreshed) {
       const h2 = new Headers(initHeaders);
