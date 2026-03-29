@@ -1,22 +1,25 @@
 'use client';
 
-import { useState } from "react";
-import { Info, Plus, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Info, X } from "lucide-react";
 import { useSites } from "../contexts/SiteContext";
 import type { Site } from "../contexts/SiteContext";
 
 interface FacilityFormProps {
   supplierId: string;
   supplier: any;
+  /** 상위 탭의 「행추가」에서 증가시키면 사업장 추가 모달을 엽니다. */
+  openAddFacilityRequest?: number;
 }
 
-export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
+export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0 }: FacilityFormProps) {
   const { sites, addSite } = useSites();
   const [projectSites, setProjectSites] = useState<Site[]>(supplier.facilities || []);
   const [showMethodModal, setShowMethodModal] = useState(false);
   const [showNewSiteForm, setShowNewSiteForm] = useState(false);
   const [showSelectSiteModal, setShowSelectSiteModal] = useState(false);
-  const [selectedMethod, setSelectedMethod] = useState<'select' | 'new' | null>(null);
+  const [selectedSiteIds, setSelectedSiteIds] = useState<string[]>([]);
+  const [isSameAsHeadquarter, setIsSameAsHeadquarter] = useState(false);
   const [newSite, setNewSite] = useState<Site>({
     id: '',
     name: '',
@@ -32,12 +35,30 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
   });
 
   const handleAddExistingSite = (site: Site) => {
-    // 이미 추가된 사업장인지 확인
-    if (projectSites.find(s => s.id === site.id)) {
-      alert('이미 추가된 사업장입니다.');
+    // 이미 추가된 사업장인지 확인(중복은 조용히 스킵)
+    setProjectSites((prev) => {
+      if (prev.some((s) => s.id === site.id)) return prev;
+      return [...prev, site];
+    });
+  };
+
+  const toggleSelectedSite = (siteId: string) => {
+    setSelectedSiteIds((prev) => {
+      if (prev.includes(siteId)) return prev.filter((id) => id !== siteId);
+      return [...prev, siteId];
+    });
+  };
+
+  const handleConfirmAddSelectedSites = () => {
+    if (selectedSiteIds.length === 0) {
+      alert('선택된 사업장이 없습니다.');
       return;
     }
-    setProjectSites([...projectSites, site]);
+
+    const selectedSites = sites.filter((s) => selectedSiteIds.includes(s.id));
+    selectedSites.forEach(handleAddExistingSite);
+
+    setSelectedSiteIds([]);
     setShowSelectSiteModal(false);
     setShowMethodModal(false);
   };
@@ -52,7 +73,7 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
     addSite(newSite);
     
     // 프로젝트 사업장 리스트에도 추가
-    setProjectSites([...projectSites, newSite]);
+    setProjectSites((prev) => [...prev, newSite]);
     
     // 폼 초기화
     setNewSite({
@@ -73,8 +94,8 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
   };
 
   const handleLoadCompanyInfo = () => {
-    setNewSite({
-      ...newSite,
+    setNewSite((prev) => ({
+      ...prev,
       id: supplier.companyInfo.registrationNumber,
       name: supplier.name,
       country: supplier.country,
@@ -84,11 +105,27 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
       phone: supplier.companyInfo.phone,
       rmiSmelter: supplier.companyInfo.rmiSmelter,
       feoc: supplier.companyInfo.feoc,
+    }));
+  };
+
+  const resetSiteForm = () => {
+    setIsSameAsHeadquarter(false);
+    setNewSite({
+      id: '',
+      name: '',
+      country: '',
+      address: '',
+      representative: '',
+      email: '',
+      phone: '',
+      renewableEnergy: '',
+      certification: '',
+      rmiSmelter: '',
+      feoc: '',
     });
   };
 
   const handleMethodSelect = (method: 'select' | 'new') => {
-    setSelectedMethod(method);
     if (method === 'select') {
       setShowSelectSiteModal(true);
     } else {
@@ -96,120 +133,105 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
     }
   };
 
+  useEffect(() => {
+    if (supplierId === 'own' && openAddFacilityRequest > 0) {
+      // 사업장 추가하기 버튼 클릭 시, 바로 체크박스 선택 모달을 엽니다.
+      setShowMethodModal(false);
+      setShowNewSiteForm(false);
+      setSelectedSiteIds([]);
+      setShowSelectSiteModal(true);
+    }
+  }, [openAddFacilityRequest, supplierId]);
+
   return (
     <div className="space-y-6">
-      {/* Info Message */}
-      <div 
-        className="rounded-xl p-4 flex items-start gap-3"
-        style={{ backgroundColor: '#F0F9FF', border: '1px solid #BAE6FD' }}
-      >
-        <Info className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: '#0284C7' }} />
-        <div>
-          <div style={{ fontWeight: 600, color: '#0369A1', marginBottom: '4px' }}>
-            사업장 정보 안내
-          </div>
-          <div style={{ fontSize: '14px', color: '#0284C7' }}>
-            사업장은 회사 전역에서 관리됩니다. 프로젝트에서는 기존 사업장을 선택하거나 새 사업장을 등록할 수 있습니다.
-          </div>
-        </div>
-      </div>
-
-      {/* Add Facility Button */}
-      {supplierId === 'own' && (
-        <div className="flex justify-end">
-          <button
-            onClick={() => setShowMethodModal(true)}
-            className="flex items-center gap-2 px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90"
-            style={{ background: 'var(--aifix-primary)' }}
-          >
-            <Plus className="w-5 h-5" />
-            <span style={{ fontWeight: 600 }}>사업장 추가</span>
-          </button>
-        </div>
-      )}
-
       {/* Facilities Table */}
-      <div className="bg-white rounded-[20px] overflow-hidden" style={{ boxShadow: "0px 4px 16px rgba(0, 0, 0, 0.05)" }}>
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr style={{ backgroundColor: '#F8F9FA' }}>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  사업장번호
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  사업장 명
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  국가 소재지
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  상세주소
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  대표자 명
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  대표 이메일
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  대표자 연락처
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  신재생 에너지 사용
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  환경 인증
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  RMI Smelter 여부
-                </th>
-                <th className="py-4 px-4 text-left" style={{ color: 'var(--aifix-navy)', fontWeight: 600, fontSize: '14px' }}>
-                  FEOC 여부
-                </th>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse border border-gray-300">
+          <thead>
+            <tr>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                사업장 명
+              </th>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                사업자등록번호
+              </th>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                종사업장번호
+              </th>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                국가 소재지
+              </th>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                상세주소
+              </th>
+              <th
+                className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-top text-sm font-semibold text-[var(--aifix-navy)]"
+                style={{
+                  maxWidth: '14rem',
+                  width: '14rem',
+                }}
+              >
+                대표자명
+              </th>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                대표 이메일
+              </th>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                대표자 연락처
+              </th>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                RMI 인증 여부
+              </th>
+              <th className="border border-gray-300 bg-[#F8F9FA] py-4 px-4 text-left align-middle text-sm font-semibold text-[var(--aifix-navy)]">
+                FEOC 여부
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {projectSites.map((facility: any, index: number) => (
+              <tr key={index} className="hover:bg-gray-50 transition-colors">
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {facility.name}
+                </td>
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {supplier?.companyInfo?.registrationNumber ?? ''}
+                </td>
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {facility.id}
+                </td>
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {facility.country}
+                </td>
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {facility.address}
+                </td>
+                <td
+                  className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]"
+                  style={{
+                    maxWidth: '14rem',
+                    wordBreak: 'break-word',
+                    overflowWrap: 'anywhere',
+                  }}
+                >
+                  {facility.representative}
+                </td>
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {facility.email}
+                </td>
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {facility.phone}
+                </td>
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {facility.rmiSmelter}
+                </td>
+                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                  {facility.feoc}
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {projectSites.map((facility: any, index: number) => (
-                <tr key={index} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.id}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.name}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.country}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.address}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.representative}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.email}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.phone}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.renewableEnergy}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.certification}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.rmiSmelter}
-                  </td>
-                  <td className="py-4 px-4" style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
-                    {facility.feoc}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+            ))}
+          </tbody>
+        </table>
       </div>
 
       {/* Method Selection Modal */}
@@ -277,6 +299,7 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
           onClick={() => {
             setShowSelectSiteModal(false);
             setShowMethodModal(false);
+            setSelectedSiteIds([]);
           }}
         >
           <div 
@@ -292,6 +315,7 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
                 onClick={() => {
                   setShowSelectSiteModal(false);
                   setShowMethodModal(false);
+                  setSelectedSiteIds([]);
                 }}
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
@@ -305,28 +329,75 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
                   key={site.id}
                   className="p-4 rounded-xl border cursor-pointer transition-all duration-200 hover:border-opacity-100"
                   style={{ borderColor: 'var(--aifix-primary)',  }}
-                  onClick={() => handleAddExistingSite(site)}
+                  onClick={() => toggleSelectedSite(site.id)}
                 >
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>사업장번호</div>
-                      <div style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>{site.id}</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>사업장 명</div>
-                      <div style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>{site.name}</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>국가 소재지</div>
-                      <div style={{ color: 'var(--aifix-navy)' }}>{site.country}</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>상세주소</div>
-                      <div style={{ color: 'var(--aifix-navy)' }}>{site.address}</div>
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={selectedSiteIds.includes(site.id)}
+                      readOnly
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSelectedSite(site.id);
+                      }}
+                      style={{ accentColor: 'var(--aifix-primary)' }}
+                    />
+
+                    <div className="grid grid-cols-2 gap-4 flex-1">
+                      <div>
+                        <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>사업장번호</div>
+                        <div style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>{site.id}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>사업장 명</div>
+                        <div style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>{site.name}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>국가 소재지</div>
+                        <div style={{ color: 'var(--aifix-navy)' }}>{site.country}</div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>상세주소</div>
+                        <div style={{ color: 'var(--aifix-navy)' }}>{site.address}</div>
+                      </div>
                     </div>
                   </div>
                 </div>
               ))}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex justify-end gap-3 mt-8 pt-6 border-t border-gray-200">
+              <button
+                onClick={() => {
+                  setShowSelectSiteModal(false);
+                  setShowMethodModal(false);
+                  setSelectedSiteIds([]);
+                }}
+                className="px-6 py-3 rounded-xl border transition-all duration-200 hover:bg-gray-50"
+                style={{ borderColor: 'var(--aifix-gray)', color: 'var(--aifix-navy)', fontWeight: 600 }}
+              >
+                취소
+              </button>
+              <button
+                onClick={() => {
+                  setShowSelectSiteModal(false);
+                  setShowMethodModal(false);
+                  setSelectedSiteIds([]);
+                  setShowNewSiteForm(true);
+                }}
+                className="px-6 py-3 rounded-xl border transition-all duration-200 hover:bg-gray-50"
+                style={{ borderColor: 'var(--aifix-gray)', color: 'var(--aifix-primary)', fontWeight: 600 }}
+              >
+                새 사업장 등록
+              </button>
+              <button
+                onClick={handleConfirmAddSelectedSites}
+                className="px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90"
+                style={{ background: 'var(--aifix-primary)', fontWeight: 600 }}
+              >
+                선택 추가
+              </button>
             </div>
           </div>
         </div>
@@ -339,6 +410,7 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
           onClick={() => {
             setShowNewSiteForm(false);
             setShowMethodModal(false);
+            resetSiteForm();
           }}
         >
           <div 
@@ -354,6 +426,7 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
                 onClick={() => {
                   setShowNewSiteForm(false);
                   setShowMethodModal(false);
+                  resetSiteForm();
                 }}
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
@@ -367,19 +440,37 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
             >
               <Info className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: '#0284C7' }} />
               <div style={{ fontSize: '14px', color: '#0284C7' }}>
-                새로 등록하는 사업장은 프로젝트 리스트와 회사 프로필 사업장 Master에 모두 추가됩니다.
+                새로 등록하는 사업장은 회사 프로필 사업장 정보에 자동 추가됩니다.
               </div>
             </div>
 
-            {/* Load Company Info Button */}
-            <div className="flex justify-end mb-6">
-              <button
-                onClick={handleLoadCompanyInfo}
-                className="px-4 py-2 rounded-lg border transition-all duration-200 hover:bg-gray-50"
-                style={{ borderColor: 'var(--aifix-primary)', color: 'var(--aifix-primary)', fontWeight: 500 }}
-              >
-                기업 기본정보 불러오기
-              </button>
+            {/* HQ Same Checkbox */}
+            <div
+              className="mb-6 p-4 rounded-xl flex items-start gap-3"
+              style={{ backgroundColor: '#F8FAFC', border: '1px solid #E5E7EB' }}
+            >
+              <input
+                type="checkbox"
+                checked={isSameAsHeadquarter}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setIsSameAsHeadquarter(checked);
+                  if (checked) {
+                    handleLoadCompanyInfo();
+                  } else {
+                    resetSiteForm();
+                  }
+                }}
+                style={{ accentColor: 'var(--aifix-primary)', marginTop: '2px' }}
+              />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, color: 'var(--aifix-navy)', marginBottom: '4px' }}>
+                  사업장이 헤드쿼터(본사)와 동일합니까?
+                </div>
+                <div style={{ fontSize: '13px', color: 'var(--aifix-gray)' }}>
+                  체크하면 아래 사업장 정보가 기업 기본정보에서 자동으로 채워집니다. 해제하면 직접 입력하세요.
+                </div>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-6">
@@ -531,10 +622,10 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
                 />
               </div>
 
-              {/* RMI Smelter 여부 */}
+              {/* RMI 인증 여부 */}
               <div>
                 <label className="block mb-2" style={{ fontWeight: 500, color: 'var(--aifix-gray)' }}>
-                  RMI Smelter 여부
+                  RMI 인증 여부
                 </label>
                 <select
                   value={newSite.rmiSmelter}
@@ -545,9 +636,8 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
                   onBlur={(e) => e.target.style.borderColor = '#E2E8F0'}
                 >
                   <option value="">선택하세요</option>
-                  <option value="인증됨">인증됨</option>
-                  <option value="미인증">미인증</option>
-                  <option value="진행중">진행중</option>
+                  <option value="해당">해당</option>
+                  <option value="미해당">미해당</option>
                 </select>
               </div>
 
@@ -565,9 +655,8 @@ export function FacilitiesTab({ supplierId, supplier }: FacilityFormProps) {
                   onBlur={(e) => e.target.style.borderColor = '#E2E8F0'}
                 >
                   <option value="">선택하세요</option>
-                  <option value="인증됨">인증됨</option>
-                  <option value="미인증">미인증</option>
-                  <option value="진행중">진행중</option>
+                  <option value="해당">해당</option>
+                  <option value="미해당">미해당</option>
                 </select>
               </div>
             </div>

@@ -16,8 +16,6 @@ import {
   Calendar,
   UserPlus,
   MessageSquare,
-  FileText,
-  User
 } from "lucide-react";
 import {
   SupplierInviteModal,
@@ -1190,7 +1188,7 @@ export function SupplyChainManagement({
               <div className="px-8 py-6 border-t border-gray-100 flex items-center justify-end gap-3">
                 <button
                   type="button"
-                  className="px-6 py-3 rounded-xl transition-all duration-150 active:scale-[0.98] hover:bg-gray-50"
+                  className="px-6 py-3 rounded-xl transition-all"
                   style={{ border: "1px solid var(--aifix-gray)", color: "var(--aifix-gray)", fontWeight: 700 }}
                   onClick={close}
                   disabled={registerSubmitting}
@@ -1201,10 +1199,11 @@ export function SupplyChainManagement({
                   type="button"
                   disabled={registerSubmitting}
                   onClick={handleRegister}
-                  className="px-6 py-3 rounded-xl text-white font-extrabold shadow-md transition-all duration-150 select-none enabled:hover:brightness-105 enabled:active:scale-[0.96] enabled:active:shadow-inner enabled:active:brightness-95 disabled:opacity-55 disabled:cursor-not-allowed disabled:active:scale-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#5B3BFA]"
+                  className="px-6 py-3 rounded-xl transition-all text-white disabled:cursor-not-allowed"
                   style={{
                     background: "linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)",
-                    boxShadow: "0 4px 14px rgba(91, 59, 250, 0.35)",
+                    fontWeight: 800,
+                    opacity: registerSubmitting ? 0.55 : 1,
                   }}
                 >
                   {registerSubmitting ? "등록 중…" : "등록하기"}

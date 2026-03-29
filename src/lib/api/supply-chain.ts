@@ -34,7 +34,7 @@ export async function getMyProjectDetail(projectId: number): Promise<SupplierPro
   return apiFetch<SupplierProject>(`${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}`);
 }
 
-/** 직하위 등록만 된 공급망 노드(added) — 초대 시 선택 */
+/** 내 노드 직하위로 등록한 공급망 노드(모든 상태) — 초대 시 선택·추가 담당자 초대 */
 export type RegisteredDirectChild = {
   id: number;
   supplier_id: number;

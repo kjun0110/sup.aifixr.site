@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   X,
   Mail,
@@ -89,6 +89,20 @@ function mapApiRowToRecord(r: InvitationHistoryItem): InviteRecord {
   };
 }
 
+type RegisteredChildOption = { id: number; company_name: string; status?: string };
+
+function formatRegisteredChildLabel(o: RegisteredChildOption): string {
+  const labels: Record<string, string> = {
+    added: "등록",
+    invited: "초대 발송",
+    signed_up: "가입 진행",
+    approved: "연결완료",
+  };
+  const s = (o.status ?? "").toLowerCase();
+  const suffix = labels[s];
+  return suffix ? `${o.company_name} (${suffix})` : o.company_name;
+}
+
 export function SupplierInviteModal({
   isOpen,
   onClose,
@@ -100,8 +114,8 @@ export function SupplierInviteModal({
   onClose: () => void;
   /** 실제 프로젝트(real-*)에서만 전달 — 공급망 노드 기준 초대·이력 API 연동 */
   inviteContext?: SupplierInviteContext | null;
-  /** added 직하위 목록 (프로젝트별) */
-  fetchRegisteredChildren?: () => Promise<{ id: number; company_name: string }[]>;
+  /** 직하위 등록 노드 목록(added~승인까지, 동일 법인 추가 담당자 초대용) */
+  fetchRegisteredChildren?: () => Promise<RegisteredChildOption[]>;
   /** 직하위 등록 후 목록 갱신용 */
   childrenReloadToken?: number;
 }) {
@@ -162,15 +176,32 @@ export function SupplierInviteModal({
     inviteContext?.projectId != null && inviteContext.parentNodeId != null,
   );
 
-  const [registeredOptions, setRegisteredOptions] = useState<{ id: number; company_name: string }[]>(
-    [],
-  );
+  const [registeredOptions, setRegisteredOptions] = useState<RegisteredChildOption[]>([]);
   const [registeredLoading, setRegisteredLoading] = useState(false);
 
   /** 실제 API 모드에서는 빈 배열로 시작 — 목(mock)이 API 실패 시 그대로 남는 문제 방지 */
   const [inviteRecords, setInviteRecords] = useState<InviteRecord[]>([]);
   const [emailSubject, setEmailSubject] = useState("[AIFIX] 공급망 데이터 등록 요청");
   const [emailBody, setEmailBody] = useState(SUPPLIER_INVITE_DEFAULT_BODY);
+  const [selectedContract, setSelectedContract] = useState("v2.0");
+  const [openCompanyDropdownId, setOpenCompanyDropdownId] = useState<string | null>(null);
+
+  const companyCandidates = useMemo(() => {
+    const base = ["세진케미칼", "동아소재", "한빛정밀", "그린테크", "코어메탈"];
+    const merged = [...base, ...inviteRecords.map((r) => r.companyName)];
+    return Array.from(new Set(merged.map((name) => name.trim()).filter(Boolean)));
+  }, [inviteRecords]);
+
+  useEffect(() => {
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest('[data-company-combobox="true"]')) {
+        setOpenCompanyDropdownId(null);
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, []);
 
   const reloadHistory = useCallback(async () => {
     if (!inviteContext?.projectId || inviteContext.parentNodeId == null) return;
@@ -608,28 +639,66 @@ export function SupplierInviteModal({
                             className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-gray-300 text-sm transition-all focus:border-[var(--aifix-primary)] focus:outline-none bg-white appearance-none"
                           >
                             <option value="">
-                              {registeredLoading ? '목록 불러오는 중…' : '등록된 직하위 협력사 선택'}
+                              {registeredLoading ? '목록 불러오는 중…' : '등록한 직하위 협력사 선택'}
                             </option>
                             {registeredOptions.map((o) => (
                               <option key={o.id} value={o.id}>
-                                {o.company_name}
+                                {formatRegisteredChildLabel(o)}
                               </option>
                             ))}
                           </select>
                         </div>
                       ) : (
-                        <div className="relative">
+                        <div className="relative" data-company-combobox="true">
                           <Building2
                             className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4"
-                            style={{ color: 'var(--aifix-gray)' }}
+                            style={{ color: "var(--aifix-gray)" }}
                           />
                           <input
                             type="text"
                             value={r.companyName}
-                            onChange={(e) => updateRecipient(r.id, { companyName: e.target.value })}
-                            placeholder="예: 세진케미칼"
+                            onFocus={() => setOpenCompanyDropdownId(r.id)}
+                            onChange={(e) => {
+                              updateRecipient(r.id, { companyName: e.target.value });
+                              setOpenCompanyDropdownId(r.id);
+                            }}
+                            placeholder="협력사 검색 또는 직접 입력"
                             className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-gray-300 text-sm transition-all focus:border-[var(--aifix-primary)] focus:outline-none"
                           />
+                          {openCompanyDropdownId === r.id && (
+                            <div className="absolute left-0 right-0 z-30 mt-1 max-h-44 overflow-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+                              {companyCandidates
+                                .filter((name) => {
+                                  const q = r.companyName.trim().toLowerCase();
+                                  if (!q) return true;
+                                  return name.toLowerCase().includes(q);
+                                })
+                                .slice(0, 12)
+                                .map((name) => (
+                                  <button
+                                    key={name}
+                                    type="button"
+                                    onClick={() => {
+                                      updateRecipient(r.id, { companyName: name });
+                                      setOpenCompanyDropdownId(null);
+                                    }}
+                                    className="w-full px-3 py-2 text-left text-sm hover:bg-gray-50"
+                                  >
+                                    {name}
+                                  </button>
+                                ))}
+                              {r.companyName.trim() &&
+                                !companyCandidates.some((name) => name === r.companyName.trim()) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setOpenCompanyDropdownId(null)}
+                                    className="w-full border-t border-gray-100 px-3 py-2 text-left text-sm text-[var(--aifix-primary)] hover:bg-gray-50"
+                                  >
+                                    직접 입력값 사용: {r.companyName.trim()}
+                                  </button>
+                                )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -764,17 +833,22 @@ export function SupplierInviteModal({
                   )}
                 </div>
               ) : (
-                <div
-                  className="w-full px-3 py-2.5 rounded-lg border border-dashed border-gray-300 text-sm text-gray-500"
+                <select
+                  value={selectedContract}
+                  onChange={(e) => setSelectedContract(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-300 text-sm"
+                  style={{ outline: "none" }}
                 >
-                  데모 화면입니다. 연동 시 서버에 등록된 활성 DATA CONTRACT가 첨부됩니다.
-                </div>
+                  <option value="v2.0">v2.0 (2026.01)</option>
+                  <option value="v1.9">v1.9 (2025.12)</option>
+                  <option value="v1.8">v1.8 (2025.11)</option>
+                </select>
               )}
 
               <p style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginTop: '8px' }}>
                 {useLiveApi
                   ? "위 내용은 초대 메일에 실제로 붙는 PDF와 동일한 개정입니다. 메일은 연동된 Gmail로 발송되며, 미연동 시「초대 메일 발송」을 누르면 Google 연동으로 안내됩니다."
-                  : "실제 서비스에서는 서버의 활성 DATA CONTRACT PDF가 자동 첨부됩니다."}
+                  : "선택한 버전의 DATA CONTRACT PDF가 자동으로 첨부됩니다"}
               </p>
             </div>
 
@@ -844,6 +918,40 @@ export function SupplierInviteModal({
                         <div className="flex items-center gap-1 text-xs flex-1" style={{ color: '#FF9800' }}>
                           <Clock className="w-3 h-3" />
                           <span style={{ fontWeight: 600 }}>승인대기</span>
+                        </div>
+                        <button
+                          onClick={() => void handleApprove(record)}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all hover:scale-105"
+                          style={{
+                            backgroundColor: '#2196F3',
+                            color: 'white',
+                            fontSize: '12px',
+                            fontWeight: 600
+                          }}
+                        >
+                          <Check className="w-3 h-3" />
+                          승인
+                        </button>
+                        <button
+                          onClick={() => void handleReject(record)}
+                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all hover:scale-105"
+                          style={{
+                            backgroundColor: '#F44336',
+                            color: 'white',
+                            fontSize: '12px',
+                            fontWeight: 600
+                          }}
+                        >
+                          <Ban className="w-3 h-3" />
+                          반려
+                        </button>
+                      </div>
+                    )}
+
+                    {(record.status === "contract_signed" || record.status === "registered") && (
+                      <div className="flex items-center gap-2 pt-3 border-t" style={{ borderColor: '#E0E0E0' }}>
+                        <div className="text-xs flex-1" style={{ color: 'var(--aifix-gray)' }}>
+                          프로젝트 진입 승인
                         </div>
                         <button
                           onClick={() => void handleApprove(record)}

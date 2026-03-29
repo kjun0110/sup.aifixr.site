@@ -38,7 +38,7 @@ const initialSites: Site[] = [
     renewableEnergy: "사용",
     certification: "ISO 14001, ISO 9001",
     rmiSmelter: "인증됨",
-    feoc: "인증됨",
+    feoc: "해당",
   },
   {
     id: "FAC-CA",
@@ -51,7 +51,7 @@ const initialSites: Site[] = [
     renewableEnergy: "사용",
     certification: "ISO 14001",
     rmiSmelter: "인증됨",
-    feoc: "인증됨",
+    feoc: "해당",
   },
 ];
 

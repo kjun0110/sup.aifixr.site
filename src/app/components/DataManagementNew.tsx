@@ -754,6 +754,7 @@ export function DataManagementNew({ tier }: DataManagementNewProps) {
   return (
     <div className="pt-8 min-w-0">
       <div style={{ minHeight: '600px' }} className="min-w-0">
+      <>
       {/* Page Header */}
       <div className="mb-8">
         <h2 className="text-3xl mb-2" style={{ fontWeight: 700, color: 'var(--aifix-navy)' }}>
@@ -1150,6 +1151,7 @@ export function DataManagementNew({ tier }: DataManagementNewProps) {
           </div>
         );
       })()}
+      </>
       </div>
     </div>
   );

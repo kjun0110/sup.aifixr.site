@@ -354,44 +354,47 @@ export function Notifications() {
   const shouldShowApprovalActions =
     selectedRecord?.type === "entry_request" &&
     selectedRecord?.isDirectSubordinate === true &&
-    selectedRecord?.fromApi === true &&
-    selectedRecord?.signupRequestId != null;
+    (Boolean(selectedRecord.signupRequestId) || selectedRecord.fromApi !== true);
 
   const handleApprove = async () => {
-    if (!selectedRecord?.signupRequestId) {
-      toast.error("승인할 가입 신청 정보가 없습니다.");
+    if (!selectedRecord) return;
+    if (selectedRecord.signupRequestId != null) {
+      setActionLoading(true);
+      try {
+        await approveSignupRequest(selectedRecord.signupRequestId);
+        toast.success("프로젝트 진입을 승인했습니다.");
+        setSelectedRecord(null);
+        await loadNotifications();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "승인 처리에 실패했습니다.");
+      } finally {
+        setActionLoading(false);
+      }
       return;
     }
-    setActionLoading(true);
-    try {
-      await approveSignupRequest(selectedRecord.signupRequestId);
-      toast.success("프로젝트 진입을 승인했습니다.");
-      setSelectedRecord(null);
-      await loadNotifications();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "승인 처리에 실패했습니다.");
-    } finally {
-      setActionLoading(false);
-    }
+    toast.success("진입 승인 처리되었습니다 (mock)");
+    setSelectedRecord(null);
   };
 
   const handleReject = async () => {
-    if (!selectedRecord?.signupRequestId) {
-      toast.error("반려할 가입 신청 정보가 없습니다.");
+    if (!selectedRecord) return;
+    if (selectedRecord.signupRequestId != null) {
+      const reason = window.prompt("반려 사유를 입력하세요. (선택)") ?? undefined;
+      setActionLoading(true);
+      try {
+        await rejectSignupRequest(selectedRecord.signupRequestId, reason || undefined);
+        toast.success("진입 요청을 반려했습니다.");
+        setSelectedRecord(null);
+        await loadNotifications();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "반려 처리에 실패했습니다.");
+      } finally {
+        setActionLoading(false);
+      }
       return;
     }
-    const reason = window.prompt("반려 사유를 입력하세요. (선택)") ?? undefined;
-    setActionLoading(true);
-    try {
-      await rejectSignupRequest(selectedRecord.signupRequestId, reason || undefined);
-      toast.success("진입 요청을 반려했습니다.");
-      setSelectedRecord(null);
-      await loadNotifications();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "반려 처리에 실패했습니다.");
-    } finally {
-      setActionLoading(false);
-    }
+    toast.success("진입 반려 처리되었습니다 (mock)");
+    setSelectedRecord(null);
   };
 
   const getTypeIcon = (type: HistoryType) => {
@@ -464,9 +467,7 @@ export function Notifications() {
   };
 
   const isActionRequired = (r: HistoryRecord) =>
-    r.type === "entry_request" &&
-    r.isDirectSubordinate === true &&
-    Boolean(r.signupRequestId);
+    r.type === "entry_request" && r.isDirectSubordinate === true;
 
   const filteredRecords = records.filter((record) => {
     if (record.direction !== mailbox) return false;
@@ -618,7 +619,7 @@ export function Notifications() {
           type="button"
           onClick={() => setMailbox("inbox")}
           className={cn(
-            "px-4 py-3 text-base font-medium border-b-2 -mb-px transition-colors",
+            "px-4 py-3 text-xl font-bold border-b-2 -mb-px transition-colors",
             mailbox === "inbox"
               ? "border-[var(--aifix-primary)] text-[var(--aifix-primary)]"
               : "border-transparent text-gray-500 hover:text-gray-700"
@@ -634,7 +635,7 @@ export function Notifications() {
             setShowActionRequiredOnly(false);
           }}
           className={cn(
-            "px-4 py-3 text-base font-medium border-b-2 -mb-px transition-colors",
+            "px-4 py-3 text-xl font-bold border-b-2 -mb-px transition-colors",
             mailbox === "outbox"
               ? "border-[var(--aifix-primary)] text-[var(--aifix-primary)]"
               : "border-transparent text-gray-500 hover:text-gray-700"
