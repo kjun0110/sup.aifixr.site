@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { 
   Check, 
@@ -13,6 +13,7 @@ import {
   FileCheck,
   ThumbsUp,
   ThumbsDown,
+  Users,
 } from "lucide-react";
 import { format, isWithinInterval, startOfDay, endOfDay } from "date-fns";
 import { ko } from "date-fns/locale";
@@ -22,6 +23,12 @@ import { Input } from "../components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { toast } from "sonner";
 import { cn } from "../components/ui/utils";
+import {
+  listMyNotifications,
+  markNotificationRead,
+  type NotificationItemOut,
+} from "../../lib/api/notification";
+import { approveSignupRequest, rejectSignupRequest } from "../../lib/api/signup-review";
 
 type DateRange = { from: Date | undefined; to?: Date | undefined };
 
@@ -31,7 +38,15 @@ const parseTimestamp = (ts: string): Date => {
   return new Date(iso);
 };
 
-type HistoryType = "save" | "request" | "calculate" | "send" | "complete" | "entry_request" | "entry_approved";
+type HistoryType =
+  | "save"
+  | "request"
+  | "calculate"
+  | "send"
+  | "complete"
+  | "entry_request"
+  | "entry_approved"
+  | "partner_tier_entry";
 
 type HistoryRecord = {
   id: string;
@@ -54,36 +69,103 @@ type HistoryRecord = {
   direction: "inbox" | "outbox"; // 수신함: toUser===우리회사, 발신함: fromUser===우리회사
   requesterEmail?: string;
   requestMessage?: string;
+  /** KJ nt_user_notifications.id */
+  backendId?: number;
+  fromApi?: boolean;
+  signupRequestId?: number;
 };
 
-export function Notifications() {
-  const [activeTab, setActiveTab] = useState<"history" | "notifications">("history");
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [selectedRecord, setSelectedRecord] = useState<HistoryRecord | null>(null);
+function isoToLocalTimestamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    return iso.replace("T", " ").slice(0, 19);
+  }
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const h = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  const s = String(d.getSeconds()).padStart(2, "0");
+  return `${y}-${m}-${day} ${h}:${min}:${s}`;
+}
 
-  // 직하위 진입 요청 승인/반려 (직하위가 승인 요청 보낸 경우에만 표시)
-  const shouldShowApprovalActions =
-    selectedRecord?.type === "entry_request" && selectedRecord?.isDirectSubordinate === true;
-
-  const handleApprove = () => {
-    toast.success("진입 승인 처리되었습니다 (mock)");
-    setSelectedRecord(null);
+function mapKjToHistoryRecord(row: NotificationItemOut): HistoryRecord {
+  const ts = row.created_at ? isoToLocalTimestamp(row.created_at) : isoToLocalTimestamp(new Date().toISOString());
+  const base = {
+    id: `kj-${row.id}`,
+    backendId: row.id,
+    fromApi: true as const,
+    timestamp: ts,
+    version: "-",
+    projectStatus: "진행중" as const,
+    contractNumber: "-",
+    deadline: "-",
+    lastUpdate: "-",
+    isRead: Boolean(row.read_at),
+    direction: "inbox" as const,
+    toUser: "우리회사",
   };
 
-  const handleReject = () => {
-    toast.success("진입 반려 처리되었습니다 (mock)");
-    setSelectedRecord(null);
+  if (row.notification_type === "signup_submitted_for_review") {
+    const companyMatch = row.body?.match(/「([^」]+)」/);
+    const fromUser = companyMatch?.[1]?.replace(/님$/, "")?.trim() || "직하위 협력사";
+    return {
+      ...base,
+      type: "entry_request",
+      changeContent: row.body || "프로젝트 진입 요청이 발생했습니다.",
+      user: fromUser,
+      projectName: row.title,
+      clientName: row.title,
+      supplyItem: "—",
+      fromUser,
+      isDirectSubordinate: true,
+      signupRequestId: row.signup_request_id ?? undefined,
+      requestMessage: row.body || undefined,
+    };
+  }
+
+  if (row.notification_type === "signup_approved_broadcast") {
+    return {
+      ...base,
+      type: "partner_tier_entry",
+      changeContent: row.body || "",
+      user: "공급망",
+      projectName: row.title,
+      clientName: row.title,
+      supplyItem: "—",
+      fromUser: "공급망 알림",
+      isDirectSubordinate: false,
+    };
+  }
+
+  if (row.notification_type === "modification_request") {
+    return {
+      ...base,
+      type: "request",
+      changeContent: row.body || row.title,
+      user: "상위차사",
+      projectName: row.title,
+      clientName: row.title,
+      supplyItem: "—",
+      fromUser: "상위차사",
+    };
+  }
+
+  return {
+    ...base,
+    type: "complete",
+    changeContent: row.body || row.title,
+    user: "-",
+    projectName: row.title,
+    clientName: row.title,
+    supplyItem: "—",
+    fromUser: "알림",
+    isDirectSubordinate: false,
   };
+}
 
-  // 프로젝트 표시명: [상위차사] 납품항목 구성 (프로젝트 카드와 동일 형식)
-  const getProjectDisplayName = (r: HistoryRecord) => `[${r.clientName}] ${r.supplyItem} 구성`;
-
-  // 간략한 설명: (발신자) 변경내용 (원청사 알림 형식)
-  const getBriefMessage = (r: HistoryRecord) => `(${r.fromUser}) ${r.changeContent}`;
-
-  // Mock 이력 데이터
-  const allHistoryRecords: HistoryRecord[] = [
+/** 데모용 보조 목록 — 진입 요청/승인은 API만 사용(중복 방지) */
+const RAW_MOCK_NOTIFICATIONS: HistoryRecord[] = [
     {
       id: "1",
       timestamp: "2026-03-04 16:10:23",
@@ -223,16 +305,94 @@ export function Notifications() {
     },
   ];
 
-  const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>(() =>
-    allHistoryRecords.filter((r) => {
-      if (r.type === "entry_request") return r.isDirectSubordinate === true;
-      return true;
-    })
-  );
+const MOCK_SUPPLEMENT_RECORDS: HistoryRecord[] = RAW_MOCK_NOTIFICATIONS.filter(
+  (r) => r.type !== "entry_request" && r.type !== "entry_approved",
+);
+
+export function Notifications() {
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedRecord, setSelectedRecord] = useState<HistoryRecord | null>(null);
+  const [records, setRecords] = useState<HistoryRecord[]>([]);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState(false);
+
+  const loadNotifications = useCallback(async () => {
+    setListLoading(true);
+    setListError(null);
+    try {
+      const rows = await listMyNotifications({ limit: 100, offset: 0 });
+      const apiMapped = rows.map(mapKjToHistoryRecord);
+      const merged = [...apiMapped, ...MOCK_SUPPLEMENT_RECORDS].sort(
+        (a, b) => parseTimestamp(b.timestamp).getTime() - parseTimestamp(a.timestamp).getTime(),
+      );
+      setRecords(merged);
+    } catch (e) {
+      setListError(e instanceof Error ? e.message : "알림을 불러오지 못했습니다.");
+      setRecords(
+        [...MOCK_SUPPLEMENT_RECORDS].sort(
+          (a, b) => parseTimestamp(b.timestamp).getTime() - parseTimestamp(a.timestamp).getTime(),
+        ),
+      );
+    } finally {
+      setListLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadNotifications();
+  }, [loadNotifications]);
 
   const [mailbox, setMailbox] = useState<"inbox" | "outbox">("inbox");
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
   const [showActionRequiredOnly, setShowActionRequiredOnly] = useState(false);
+
+  const getProjectDisplayName = (r: HistoryRecord) => `[${r.clientName}] ${r.supplyItem} 구성`;
+  const getBriefMessage = (r: HistoryRecord) => `(${r.fromUser}) ${r.changeContent}`;
+
+  const shouldShowApprovalActions =
+    selectedRecord?.type === "entry_request" &&
+    selectedRecord?.isDirectSubordinate === true &&
+    selectedRecord?.fromApi === true &&
+    selectedRecord?.signupRequestId != null;
+
+  const handleApprove = async () => {
+    if (!selectedRecord?.signupRequestId) {
+      toast.error("승인할 가입 신청 정보가 없습니다.");
+      return;
+    }
+    setActionLoading(true);
+    try {
+      await approveSignupRequest(selectedRecord.signupRequestId);
+      toast.success("프로젝트 진입을 승인했습니다.");
+      setSelectedRecord(null);
+      await loadNotifications();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "승인 처리에 실패했습니다.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!selectedRecord?.signupRequestId) {
+      toast.error("반려할 가입 신청 정보가 없습니다.");
+      return;
+    }
+    const reason = window.prompt("반려 사유를 입력하세요. (선택)") ?? undefined;
+    setActionLoading(true);
+    try {
+      await rejectSignupRequest(selectedRecord.signupRequestId, reason || undefined);
+      toast.success("진입 요청을 반려했습니다.");
+      setSelectedRecord(null);
+      await loadNotifications();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "반려 처리에 실패했습니다.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
 
   const getTypeIcon = (type: HistoryType) => {
     switch (type) {
@@ -250,6 +410,8 @@ export function Notifications() {
         return <CirclePlus className="w-4 h-4" />;
       case "entry_approved":
         return <Check className="w-4 h-4" />;
+      case "partner_tier_entry":
+        return <Users className="w-4 h-4" />;
       default:
         return <FileText className="w-4 h-4" />;
     }
@@ -271,6 +433,8 @@ export function Notifications() {
         return "진입 요청";
       case "entry_approved":
         return "진입 승인";
+      case "partner_tier_entry":
+        return "협력사 진입";
       default:
         return type;
     }
@@ -292,15 +456,19 @@ export function Notifications() {
         return "#FF9800";
       case "entry_approved":
         return "#4CAF50";
+      case "partner_tier_entry":
+        return "#00897B";
       default:
         return "#757575";
     }
   };
 
   const isActionRequired = (r: HistoryRecord) =>
-    r.type === "entry_request" && r.isDirectSubordinate === true;
+    r.type === "entry_request" &&
+    r.isDirectSubordinate === true &&
+    Boolean(r.signupRequestId);
 
-  const filteredRecords = historyRecords.filter((record) => {
+  const filteredRecords = records.filter((record) => {
     if (record.direction !== mailbox) return false;
 
     if (mailbox === "inbox") {
@@ -337,17 +505,23 @@ export function Notifications() {
   });
 
   const inboxCounts = {
-    total: historyRecords.filter((r) => r.direction === "inbox").length,
-    unread: historyRecords.filter((r) => r.direction === "inbox" && !r.isRead).length,
-    actionRequired: historyRecords.filter((r) => r.direction === "inbox" && isActionRequired(r)).length,
+    total: records.filter((r) => r.direction === "inbox").length,
+    unread: records.filter((r) => r.direction === "inbox" && !r.isRead).length,
+    actionRequired: records.filter((r) => r.direction === "inbox" && isActionRequired(r)).length,
   };
-  const outboxCount = historyRecords.filter((r) => r.direction === "outbox").length;
+  const outboxCount = records.filter((r) => r.direction === "outbox").length;
 
   const handleSelectRecord = (record: HistoryRecord) => {
     setSelectedRecord(record);
-    setHistoryRecords((prev) =>
-      prev.map((r) => (r.id === record.id ? { ...r, isRead: true } : r))
-    );
+    const markLocalRead = () => {
+      setRecords((prev) => prev.map((r) => (r.id === record.id ? { ...r, isRead: true } : r)));
+      setSelectedRecord((cur) => (cur?.id === record.id ? { ...cur, isRead: true } : cur));
+    };
+    if (record.fromApi && record.backendId != null && !record.isRead) {
+      void markNotificationRead(record.backendId).then(markLocalRead).catch(markLocalRead);
+    } else {
+      markLocalRead();
+    }
   };
 
   return (
@@ -518,7 +692,11 @@ export function Notifications() {
               </h3>
               <p className="text-base mt-1 text-gray-500">
                 총 {filteredRecords.length}건의 알림
+                {listLoading ? " · 불러오는 중…" : null}
               </p>
+              {listError ? (
+                <p className="text-sm text-amber-700 mt-2">{listError} (데모 목록만 표시됩니다)</p>
+              ) : null}
             </div>
 
             {/* 테이블 헤더 */}
@@ -542,6 +720,9 @@ export function Notifications() {
 
             {/* 테이블 바디 */}
             <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
+              {listLoading && records.length === 0 ? (
+                <div className="px-6 py-12 text-center text-gray-500 text-sm">알림을 불러오는 중입니다…</div>
+              ) : null}
               {filteredRecords.map((record) => {
                 const isSelected = selectedRecord?.id === record.id;
 
@@ -698,8 +879,9 @@ export function Notifications() {
                     </div>
                     <div className="flex gap-2">
                       <Button
-                        onClick={handleApprove}
+                        onClick={() => void handleApprove()}
                         size="sm"
+                        disabled={actionLoading}
                         className="bg-green-600 hover:bg-green-700 text-white"
                       >
                         <ThumbsUp size={14} className="mr-1.5" />
@@ -708,14 +890,17 @@ export function Notifications() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={handleReject}
+                        onClick={() => void handleReject()}
+                        disabled={actionLoading}
                         className="border-red-200 text-red-600 hover:bg-red-50"
                       >
                         <ThumbsDown size={14} className="mr-1.5" />
                         반려
                       </Button>
                     </div>
-                    <p className="text-xs text-gray-400">직하위가 진입 요청한 경우에만 노출됩니다.</p>
+                    <p className="text-xs text-gray-400">
+                      직하위 협력사의 가입 제출 알림이며, 서버에 신청 ID가 연결된 경우에만 승인·반려할 수 있습니다.
+                    </p>
                   </div>
                 )}
 
