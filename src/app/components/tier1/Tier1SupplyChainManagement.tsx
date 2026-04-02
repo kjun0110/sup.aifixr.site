@@ -326,7 +326,7 @@ export function Tier1SupplyChainManagement() {
           }}
         >
           <UserPlus className="w-5 h-5" />
-          하위 협력사 초대
+          하위협력사 초대 및 관리
         </button>
       </div>
 

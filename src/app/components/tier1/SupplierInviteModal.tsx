@@ -521,7 +521,7 @@ export function SupplierInviteModal({
         >
           <div>
             <h2 className="text-2xl mb-1" style={{ fontWeight: 700, color: 'var(--aifix-navy)' }}>
-              하위 협력사 초대
+              하위협력사 초대 및 관리
             </h2>
             <p style={{ fontSize: '14px', color: 'var(--aifix-gray)' }}>
               직접 하위 협력사에게 AIFIX 시스템 등록 안내 메일을 발송합니다

@@ -101,6 +101,11 @@ export function SupplyChainManagement({
   const [extraTreeChildren, setExtraTreeChildren] = useState<CompanyNode[]>([]);
   const [registeredChildrenTick, setRegisteredChildrenTick] = useState(0);
   const [registerSubmitting, setRegisterSubmitting] = useState(false);
+  const [registerOrderProductName, setRegisterOrderProductName] = useState("");
+  const [registerContractStart, setRegisterContractStart] = useState("");
+  const [registerContractEnd, setRegisterContractEnd] = useState("");
+  const [registerMonthlyQty, setRegisterMonthlyQty] = useState("");
+  const [registerUnit, setRegisterUnit] = useState("");
 
   const fetchRegisteredChildren = useCallback(async () => {
     if (inviteContext?.projectId == null) return [];
@@ -549,7 +554,7 @@ export function SupplyChainManagement({
             }}
           >
             <UserPlus className="w-5 h-5" />
-            하위 협력사 초대
+            하위협력사 초대 및 관리
           </button>
         </div>
       </div>
@@ -640,7 +645,7 @@ export function SupplyChainManagement({
                 등록된 하위 협력사가 없습니다
               </h3>
               <p style={{ color: 'var(--aifix-gray)', fontSize: '14px', lineHeight: 1.6, marginBottom: '24px' }}>
-                "하위 협력사 초대" 버튼을 클릭하여<br />
+                「하위협력사 초대 및 관리」버튼을 클릭하여<br />
                 협력사를 등록하고 데이터를 요청할 수 있습니다.
               </p>
               <button
@@ -654,7 +659,7 @@ export function SupplyChainManagement({
                 }}
               >
                 <UserPlus className="w-5 h-5" />
-                하위 협력사 초대
+                하위협력사 초대 및 관리
               </button>
             </div>
           ) : (
@@ -986,6 +991,11 @@ export function SupplyChainManagement({
           setSelectedRegisterCompany(null);
           setRegisterBusinessNumber("");
           setCompanyDropdownOpen(false);
+          setRegisterOrderProductName("");
+          setRegisterContractStart("");
+          setRegisterContractEnd("");
+          setRegisterMonthlyQty("");
+          setRegisterUnit("");
         };
 
         const liveProjectId = inviteContext?.projectId;
@@ -1006,11 +1016,40 @@ export function SupplyChainManagement({
                 toast.error("사업자등록번호를 입력해 주세요.");
                 return;
               }
+              const orderName = registerOrderProductName.trim();
+              if (!orderName) {
+                toast.error("수주 제품명을 입력해 주세요.");
+                return;
+              }
+              if (!registerContractStart || !registerContractEnd) {
+                toast.error("계약 시작일과 종료일을 선택해 주세요.");
+                return;
+              }
+              if (registerContractEnd < registerContractStart) {
+                toast.error("계약 종료일은 시작일 이후여야 합니다.");
+                return;
+              }
+              const qtyRaw = registerMonthlyQty.trim();
+              if (qtyRaw === "") {
+                toast.error("월 예정 수주 수량을 입력해 주세요.");
+                return;
+              }
+              const qtyNum = Number(qtyRaw);
+              if (!Number.isFinite(qtyNum) || qtyNum < 0) {
+                toast.error("월 예정 수주 수량은 0 이상의 숫자로 입력해 주세요.");
+                return;
+              }
+              const unitTrim = registerUnit.trim();
               setRegisterSubmitting(true);
               try {
                 await postRegisterDirectChild(liveProjectId, {
                   company_name: nameForLive,
                   business_registration_number: biz,
+                  supplied_item_name: orderName,
+                  contract_start: registerContractStart,
+                  contract_end: registerContractEnd,
+                  monthly_planned_qty: qtyNum,
+                  unit: unitTrim ? unitTrim : null,
                 });
                 close();
                 toast.success("등록되었습니다", {
@@ -1096,92 +1135,166 @@ export function SupplyChainManagement({
                 </button>
               </div>
 
-              <div className="px-8 py-6">
-                <div className="grid grid-cols-1 gap-5">
-                  <div>
-                    <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
-                      1. 회사명
-                    </div>
-                    {isLiveRegister ? (
-                      <div>
-                        <input
-                          value={companyQuery}
-                          onChange={(e) => {
-                            setCompanyQuery(e.target.value);
-                            setSelectedRegisterCompany(null);
-                          }}
-                          placeholder="정식 회사명 (초대 시 선택 목록과 동일해야 합니다)"
-                          className="w-full rounded-[16px] border border-gray-200 p-3 text-sm"
-                          style={{ outline: "none" }}
-                        />
-                        <p className="mt-2 text-xs" style={{ color: "var(--aifix-gray)" }}>
-                          이후「하위 협력사 초대」에서 동일한 이름으로 선택·발송합니다.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="relative">
-                        <Search
-                          className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4"
-                          style={{ color: "var(--aifix-gray)" }}
-                        />
-                        <input
-                          value={companyQuery}
-                          onChange={(e) => {
-                            setCompanyQuery(e.target.value);
-                            setCompanyDropdownOpen(true);
-                            setSelectedRegisterCompany(null);
-                            setRegisterBusinessNumber("");
-                          }}
-                          onFocus={() => setCompanyDropdownOpen(true)}
-                          placeholder="회사명 검색"
-                          className="w-full rounded-[16px] border border-gray-200 p-3 pl-10 text-sm"
-                          style={{ outline: "none" }}
-                        />
-
-                        {companyDropdownOpen && candidates.length > 0 && (
-                          <div
-                            className="absolute z-10 mt-2 w-full rounded-[16px] border border-gray-200 bg-white shadow-lg overflow-hidden"
-                          >
-                            {candidates.map((c) => (
-                              <button
-                                key={c.id}
-                                type="button"
-                                onClick={() => {
-                                  setSelectedRegisterCompany(c);
-                                  setCompanyQuery(c.name);
-                                  setRegisterBusinessNumber(c.taxId);
-                                  setCompanyDropdownOpen(false);
-                                }}
-                                className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
-                                style={{ color: "var(--aifix-navy)", fontWeight: 600 }}
-                              >
-                                {c.name}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-
-                        {companyDropdownOpen && candidates.length === 0 && companyQuery.trim() && (
-                          <div className="absolute z-10 mt-2 w-full rounded-[16px] border border-gray-200 bg-white p-3 text-sm" style={{ color: "var(--aifix-gray)" }}>
-                            검색 결과가 없습니다.
-                          </div>
-                        )}
-                      </div>
-                    )}
+              <div className="px-8 py-6 space-y-6 max-h-[min(70vh,640px)] overflow-y-auto">
+                {/* 1. 회사명 — 전체 너비, 안내는 입력 아래 */}
+                <div className="w-full">
+                  <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
+                    1. 회사명
                   </div>
-
-                  <div>
-                    <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
-                      2. 사업자등록번호
+                  {isLiveRegister ? (
+                    <div>
+                      <input
+                        value={companyQuery}
+                        onChange={(e) => {
+                          setCompanyQuery(e.target.value);
+                          setSelectedRegisterCompany(null);
+                        }}
+                        placeholder="정식 회사명 (초대 시 선택 목록과 동일해야 합니다)"
+                        className="w-full rounded-[16px] border border-gray-200 p-3 text-sm"
+                        style={{ outline: "none" }}
+                      />
+                      <p className="mt-2 text-xs" style={{ color: "var(--aifix-gray)" }}>
+                        이후「하위협력사 초대 및 관리」에서 동일한 이름으로 선택·발송합니다.
+                      </p>
                     </div>
+                  ) : (
+                    <div className="relative">
+                      <Search
+                        className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4"
+                        style={{ color: "var(--aifix-gray)" }}
+                      />
+                      <input
+                        value={companyQuery}
+                        onChange={(e) => {
+                          setCompanyQuery(e.target.value);
+                          setCompanyDropdownOpen(true);
+                          setSelectedRegisterCompany(null);
+                          setRegisterBusinessNumber("");
+                        }}
+                        onFocus={() => setCompanyDropdownOpen(true)}
+                        placeholder="회사명 검색"
+                        className="w-full rounded-[16px] border border-gray-200 p-3 pl-10 text-sm"
+                        style={{ outline: "none" }}
+                      />
+
+                      {companyDropdownOpen && candidates.length > 0 && (
+                        <div
+                          className="absolute z-10 mt-2 w-full rounded-[16px] border border-gray-200 bg-white shadow-lg overflow-hidden"
+                        >
+                          {candidates.map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedRegisterCompany(c);
+                                setCompanyQuery(c.name);
+                                setRegisterBusinessNumber(c.taxId);
+                                setCompanyDropdownOpen(false);
+                              }}
+                              className="w-full px-4 py-3 text-left text-sm hover:bg-gray-50"
+                              style={{ color: "var(--aifix-navy)", fontWeight: 600 }}
+                            >
+                              {c.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {companyDropdownOpen && candidates.length === 0 && companyQuery.trim() && (
+                        <div className="absolute z-10 mt-2 w-full rounded-[16px] border border-gray-200 bg-white p-3 text-sm" style={{ color: "var(--aifix-gray)" }}>
+                          검색 결과가 없습니다.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* 2. 사업자등록번호 — 다음 행 전체 너비 */}
+                <div className="w-full">
+                  <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
+                    2. 사업자등록번호
+                  </div>
+                  <input
+                    value={registerBusinessNumber}
+                    onChange={(e) => setRegisterBusinessNumber(e.target.value)}
+                    placeholder="예: 110-81-12345"
+                    className="w-full rounded-[16px] border border-gray-200 p-3 text-sm"
+                    style={{ outline: "none" }}
+                  />
+                </div>
+
+                {/* 3. 수주 제품명 — 전체 너비 */}
+                <div className="w-full">
+                  <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
+                    3. 수주 제품명
+                  </div>
+                  <input
+                    value={registerOrderProductName}
+                    onChange={(e) => setRegisterOrderProductName(e.target.value)}
+                    placeholder="직하위로부터 받는 품목명"
+                    className="w-full rounded-[16px] border border-gray-200 p-3 text-sm"
+                    style={{ outline: "none" }}
+                  />
+                  <p className="mt-1.5 text-xs" style={{ color: "var(--aifix-gray)" }}>
+                    귀사가 직하위 협력사로부터 수주하는 품목입니다.
+                  </p>
+                </div>
+
+                {/* 4. 계약기간 — 블록 전체 너비, 시작~종료 가로 */}
+                <div className="w-full">
+                  <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
+                    4. 계약기간
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3 w-full">
                     <input
-                      value={registerBusinessNumber}
-                      onChange={(e) => setRegisterBusinessNumber(e.target.value)}
-                      placeholder="예: 110-81-12345"
-                      className="w-full rounded-[16px] border border-gray-200 p-3 text-sm"
+                      type="date"
+                      value={registerContractStart}
+                      onChange={(e) => setRegisterContractStart(e.target.value)}
+                      className="w-full min-w-0 flex-1 rounded-[16px] border border-gray-200 p-3 text-sm"
+                      style={{ outline: "none" }}
+                    />
+                    <span className="hidden sm:inline text-sm shrink-0" style={{ color: "var(--aifix-gray)" }}>
+                      ~
+                    </span>
+                    <input
+                      type="date"
+                      value={registerContractEnd}
+                      onChange={(e) => setRegisterContractEnd(e.target.value)}
+                      className="w-full min-w-0 flex-1 rounded-[16px] border border-gray-200 p-3 text-sm"
                       style={{ outline: "none" }}
                     />
                   </div>
+                  <p className="mt-2 text-xs" style={{ color: "var(--aifix-gray)" }}>
+                    계약이 유효한 기간의 시작·종료일입니다.
+                  </p>
+                </div>
+
+                {/* 5. 월 예정 수주 수량 — 수량 넓게 + 단위 좁게 */}
+                <div className="w-full">
+                  <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
+                    5. 월 예정 수주 수량
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3 w-full">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={registerMonthlyQty}
+                      onChange={(e) => setRegisterMonthlyQty(e.target.value)}
+                      placeholder="매월 동일 수량"
+                      className="w-full min-w-0 flex-1 rounded-[16px] border border-gray-200 p-3 text-sm"
+                      style={{ outline: "none" }}
+                    />
+                    <input
+                      value={registerUnit}
+                      onChange={(e) => setRegisterUnit(e.target.value)}
+                      placeholder="단위"
+                      className="w-full sm:w-28 shrink-0 rounded-[16px] border border-gray-200 p-3 text-sm"
+                      style={{ outline: "none" }}
+                    />
+                  </div>
+                  <p className="mt-2 text-xs" style={{ color: "var(--aifix-gray)" }}>
+                    매월 동일하게 수주할 예정인 수량입니다.
+                  </p>
                 </div>
               </div>
 

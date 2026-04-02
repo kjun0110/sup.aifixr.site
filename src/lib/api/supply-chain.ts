@@ -51,9 +51,20 @@ export async function getRegisteredDirectChildren(
   );
 }
 
+/** POST .../registered-direct-children 요청 본문 (KJ sup_supply_contracts 연동) */
+export type RegisterDirectChildPayload = {
+  company_name: string;
+  business_registration_number: string;
+  supplied_item_name: string;
+  contract_start: string;
+  contract_end: string;
+  monthly_planned_qty: number;
+  unit?: string | null;
+};
+
 export async function postRegisterDirectChild(
   projectId: number,
-  body: { company_name: string; business_registration_number: string },
+  body: RegisterDirectChildPayload,
 ): Promise<RegisteredDirectChild> {
   return apiFetch<RegisteredDirectChild>(
     `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}/registered-direct-children`,
