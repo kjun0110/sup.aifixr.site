@@ -7,7 +7,8 @@ import {
   Database, 
   Search, 
   Send, 
-  Eye 
+  Eye,
+  ScanText,
 } from "lucide-react";
 
 type ProjectNavProps = {
@@ -32,6 +33,7 @@ export function ProjectNav({
     { id: "dashboard", label: "대시보드", icon: LayoutDashboard },
     { id: "supply-chain", label: "공급망 관리", icon: Network },
     { id: "data-mgmt", label: "데이터 관리", icon: Database },
+    { id: "ocr-data", label: "OCR데이터 입력", icon: ScanText },
     { id: "pcf-submit", label: "PCF 산정", icon: Eye },
     { id: "transmission", label: "전송", icon: Send },
   ];

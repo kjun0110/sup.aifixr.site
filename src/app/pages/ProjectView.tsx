@@ -5,6 +5,7 @@ import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { ProjectNav } from "../components/ProjectNav";
 import { SupplyChainManagement } from "../components/SupplyChainManagement";
 import { DataManagementNew } from "../components/DataManagementNew";
+import { OcrDataInput } from "../components/OcrDataInput";
 import { Tier1Dashboard } from "../components/tier1/Tier1Dashboard";
 import { Tier1DataLookup } from "../components/tier1/Tier1DataLookup";
 import { Tier1PCFSubmit } from "../components/tier1/Tier1PCFSubmit";
@@ -152,6 +153,9 @@ export function ProjectView() {
       case "data-mgmt":
         // 통합된 데이터 관리 화면 - 모든 차수 공통
         return <DataManagementNew tier={currentTier} />;
+
+      case "ocr-data":
+        return <OcrDataInput />;
       
       case "data-view":
         return currentTier === "tier1"
@@ -201,6 +205,7 @@ function PlaceholderContent({ tier, tabId }: { tier: string; tabId: string }) {
       "dashboard": "대시보드",
       "supply-chain": "공급망 관리",
       "data-mgmt": "데이터 관리",
+      "ocr-data": "OCR데이터 입력",
       "data-view": "데이터 조회",
       "pcf-submit": "PCF 산정",
       "transmission": "전송",
