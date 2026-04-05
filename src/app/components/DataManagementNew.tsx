@@ -2,6 +2,11 @@
 
 import { useMemo, useState, useEffect, useRef } from "react";
 import { useParams, useRouter, useSearchParams, usePathname } from "next/navigation";
+import { toast } from "sonner";
+import {
+  postSupSupplyChainTree,
+  type SupSupplyChainTreeNodeDto,
+} from "../../lib/api/data-mgmt";
 import { 
   ChevronRight,
   ChevronDown,
@@ -24,9 +29,24 @@ import { MonthPicker } from "./MonthPicker";
 const DATA_MGMT_FILTER_STORAGE_KEY = 'aifix_data_mgmt_filters_v1';
 const DATA_MGMT_BACK_FLAG_KEY = 'aifix_data_mgmt_from_back_v1';
 
+export type DataMgmtLinkedProject = {
+  projectId: number;
+  productId: number;
+  supplierId: number;
+  productVariantId?: number | null;
+};
+
 type DataManagementNewProps = {
   tier: "tier1" | "tier2" | "tier3";
+  /** 실제 프로젝트(real-*)일 때만 전달 — 공급망 트리 API(루트=내 협력사) */
+  linkedProject?: DataMgmtLinkedProject | null;
 };
+
+function periodToYmKorean(period: string): string | null {
+  const m = period.match(/(\d{4})\s*년\s*(\d{1,2})\s*월/);
+  if (!m) return null;
+  return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, "0")}`;
+}
 
 type SupplierNode = {
   id: string;
@@ -50,7 +70,45 @@ type RequestModalNode = {
   children?: RequestModalNode[];
 };
 
-export function DataManagementNew({ tier }: DataManagementNewProps) {
+function mapSupTreeToSupplierNode(
+  api: SupSupplyChainTreeNodeDto,
+  opts?: { rootId?: string },
+): SupplierNode {
+  const id =
+    opts?.rootId ??
+    (api.node_id != null ? `n-${api.node_id}` : `s-${api.supplier_id}`);
+  const ds = (api.data_status || "").toLowerCase();
+  const dataStatus: SupplierNode["dataStatus"] =
+    ds === "complete" ? "완료" : ds === "reviewing" ? "검토중" : "미제출";
+  const ps = (api.pcf_status || "").toLowerCase();
+  const pcfStatus: SupplierNode["pcfStatus"] =
+    ps === "complete"
+      ? "완료"
+      : ps === "verifying"
+        ? "검증중"
+        : ps === "not_submitted"
+          ? "미제출"
+          : "계산 대기";
+  return {
+    id,
+    name: api.is_me ? `${api.supplier_name} (나)` : api.supplier_name,
+    country: api.country?.trim() || "—",
+    type: api.company_type?.trim() || "—",
+    volume: api.delivery_qty?.trim() || "—",
+    dataStatus,
+    lastUpdate: api.last_updated?.trim() || "—",
+    dqr: api.dqr?.trim() || "—",
+    pcfStatus,
+    pcfResult: null,
+    isOwn: Boolean(api.is_me),
+    children: (api.children ?? []).map((ch) => mapSupTreeToSupplierNode(ch)),
+  };
+}
+
+export function DataManagementNew({
+  tier,
+  linkedProject = null,
+}: DataManagementNewProps) {
   const params = useParams();
   const projectId = typeof params.projectId === 'string' ? params.projectId : params.projectId?.[0] ?? 'p1';
   const router = useRouter();
@@ -63,8 +121,8 @@ export function DataManagementNew({ tier }: DataManagementNewProps) {
     if (projectId === 'p1' && tier === 'tier1') return new Set(['root', 'tier3-1', 'tier4-1']);
     // P3(디오케미칼): 디오(나) → 켐텍소재 기본 펼침
     if (projectId === 'p3' && tier === 'tier3') return new Set(['root', 'tier4-1']);
-    // 기본(SDI 루트): 1차→2차→3차→4차 노드 기본 펼침
-    if (projectId !== 'p2' && tier === 'tier1') return new Set(['root', 'tier1-1', 'tier2-1', 'tier3-1']);
+    // 1차 협력사 목업: 동우(나) 루트 → 세진→디오→켐텍 일부 펼침
+    if (projectId !== 'p2' && tier === 'tier1') return new Set(['root', 'tier3-1', 'tier4-1']);
     return new Set(['root']);
   });
 
@@ -79,6 +137,54 @@ export function DataManagementNew({ tier }: DataManagementNewProps) {
   const [requestScopes, setRequestScopes] = useState<RequestScopeType[]>([]);
   const [requestMessage, setRequestMessage] = useState('');
   const [requestDueDate, setRequestDueDate] = useState('');
+  const [apiRoot, setApiRoot] = useState<SupplierNode | null>(null);
+  const [apiLoading, setApiLoading] = useState(false);
+
+  useEffect(() => {
+    if (!linkedProject || !showResults || !period?.trim()) {
+      setApiRoot(null);
+      setApiLoading(false);
+      return;
+    }
+    const ym = periodToYmKorean(period);
+    if (!ym) return;
+    const [ys, ms] = ym.split("-");
+    const reportingYear = parseInt(ys, 10);
+    const reportingMonth = parseInt(ms, 10);
+    if (!Number.isFinite(reportingYear) || !Number.isFinite(reportingMonth)) return;
+
+    let cancelled = false;
+    setApiLoading(true);
+    (async () => {
+      try {
+        const raw = await postSupSupplyChainTree(
+          linkedProject.projectId,
+          linkedProject.productId,
+          linkedProject.supplierId,
+          {
+            reporting_year: reportingYear,
+            reporting_month: reportingMonth,
+            product_variant_id: linkedProject.productVariantId ?? null,
+          },
+        );
+        if (!cancelled) {
+          setApiRoot(mapSupTreeToSupplierNode(raw, { rootId: "root" }));
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setApiRoot(null);
+          toast.error(
+            e instanceof Error ? e.message : "공급망 데이터를 불러오지 못했습니다.",
+          );
+        }
+      } finally {
+        if (!cancelled) setApiLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [linkedProject, showResults, period]);
 
   useEffect(() => {
     try {
@@ -221,8 +327,8 @@ export function DataManagementNew({ tier }: DataManagementNewProps) {
       };
     }
 
-    // p1: (협력사 포털) 로그인 사용자=동우전자부품 → 동우전자부품 + (세진케미칼/그린에너지솔루션) + 세진 하위(디오/솔브런트)만 표시
-    if (projectId === 'p1' && tier === 'tier1') {
+    // 1차 협력사 목업 공통: 루트 = 내 기업(동우) — 원청(SD)부터 내리지 않음
+    if (tier === 'tier1') {
       return {
         id: 'root',
         name: '동우전자부품 (나)',
@@ -462,36 +568,40 @@ export function DataManagementNew({ tier }: DataManagementNewProps) {
     };
   }, [projectId, tier]);
 
+  const displayTree = useMemo((): SupplierNode | null => {
+    if (linkedProject) return apiRoot;
+    return supplyChainData;
+  }, [linkedProject, apiRoot, supplyChainData]);
+
+  const showLeafEmptyBanner = Boolean(
+    !linkedProject &&
+      displayTree &&
+      (!displayTree.children || displayTree.children.length === 0),
+  );
+
   // 데이터 요청 모달용 트리: p1=전체 하위, p2=세진(나)+직하위(디오/솔브), p3=디오(나)+직하위(켐텍)
   const requestModalTree: RequestModalNode = useMemo(() => {
-    if (projectId === 'p1' && tier === 'tier1') {
+    if (tier === 'tier1') {
       return {
         id: 'root',
-        name: '삼성SDI',
-        tier: 'tier0',
+        name: '동우전자부품 (나)',
+        tier: 'tier1',
         children: [
           {
-            id: 'tier1-1',
-            name: '동우전자부품 (나)',
-            tier: 'tier1',
+            id: 'tier2-1',
+            name: '세진케미칼',
+            tier: 'tier2',
             children: [
               {
-                id: 'tier2-1',
-                name: '세진케미칼',
-                tier: 'tier2',
-                children: [
-                  {
-                    id: 'tier3-1',
-                    name: '디오케미칼',
-                    tier: 'tier3',
-                    children: [{ id: 'tier4-1', name: '켐텍소재', tier: 'tier4' }],
-                  },
-                  { id: 'tier3-2', name: '솔브런트', tier: 'tier3' },
-                ],
+                id: 'tier3-1',
+                name: '디오케미칼',
+                tier: 'tier3',
+                children: [{ id: 'tier4-1', name: '켐텍소재', tier: 'tier4' }],
               },
-              { id: 'tier2-2', name: '그린에너지솔루션', tier: 'tier2' },
+              { id: 'tier3-2', name: '솔브런트', tier: 'tier3' },
             ],
           },
+          { id: 'tier2-2', name: '그린에너지솔루션', tier: 'tier2' },
         ],
       };
     }
@@ -869,7 +979,13 @@ export function DataManagementNew({ tier }: DataManagementNewProps) {
 
             {/* Table Body */}
             <div>
-              {renderSupplierRow(supplyChainData)}
+              {linkedProject && apiLoading && !displayTree ? (
+                <div className="py-16 text-center text-gray-500">공급망 데이터를 불러오는 중…</div>
+              ) : displayTree ? (
+                renderSupplierRow(displayTree)
+              ) : linkedProject ? (
+                <div className="py-16 text-center text-gray-500">트리를 표시할 수 없습니다.</div>
+              ) : null}
             </div>
           </div>
 
@@ -889,8 +1005,8 @@ export function DataManagementNew({ tier }: DataManagementNewProps) {
             </div>
           </div>
 
-          {/* Empty State */}
-          {!supplyChainData.children || supplyChainData.children.length === 0 ? (
+          {/* Empty State (목업 전용: 하위 없는 리프 루트) */}
+          {showLeafEmptyBanner ? (
             <div className="text-center py-24 bg-white rounded-[20px] mt-8" style={{ boxShadow: "0px 4px 16px rgba(0, 0, 0, 0.05)" }}>
               <div 
                 className="w-24 h-24 rounded-full mx-auto mb-6 flex items-center justify-center"

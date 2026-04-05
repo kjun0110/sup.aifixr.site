@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   SUP_GOOGLE_LINK_RETURN_STORAGE_KEY,
   SUP_GOOGLE_LINK_REOPEN_INVITE_MODAL_KEY,
+  SUP_PENDING_INVITE_SEND_STORAGE_KEY,
 } from "@/lib/api/supGoogleLink";
 
 /**
@@ -28,7 +29,12 @@ export function SupGoogleLinkReturnHandler() {
       sessionStorage.getItem(SUP_GOOGLE_LINK_REOPEN_INVITE_MODAL_KEY) === "1";
     sessionStorage.removeItem(SUP_GOOGLE_LINK_REOPEN_INVITE_MODAL_KEY);
 
-    toast.success("Google 계정 연동이 완료되었습니다. 초대 메일을 다시 발송해 주세요.");
+    const pendingInvite = sessionStorage.getItem(SUP_PENDING_INVITE_SEND_STORAGE_KEY);
+    toast.success(
+      pendingInvite?.trim()
+        ? "Google 계정 연동이 완료되었습니다. 잠시 후 초대 메일을 자동 발송합니다."
+        : "Google 계정 연동이 완료되었습니다.",
+    );
 
     const withInviteQuery = (path: string): string => {
       if (!reopenInvite) return path;

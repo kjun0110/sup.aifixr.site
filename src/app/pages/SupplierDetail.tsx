@@ -2530,7 +2530,7 @@ export function SupplierDetail() {
                 <div className="flex items-center justify-end gap-2 mb-4">
                   <button
                     type="button"
-                    onClick={() => setExcelDownloadModalTabs(tabs.map((t) => t.id))}
+                    onClick={() => setExcelDownloadModalTabs([...ALL_DETAIL_TAB_IDS])}
                     className="px-4 py-2 rounded-lg border transition-all duration-200 hover:bg-gray-50"
                     style={{
                       borderColor: 'var(--aifix-gray)',
@@ -2559,7 +2559,9 @@ export function SupplierDetail() {
                 </div>
 
                 <div className="flex flex-wrap gap-4">
-                  {tabs.map((t) => (
+                  {tabs
+                    .filter((t) => ALL_DETAIL_TAB_IDS.includes(t.id))
+                    .map((t) => (
                     <label
                       key={t.id}
                       className="flex items-center gap-2 text-sm"

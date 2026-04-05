@@ -8,6 +8,9 @@ export const SUP_GOOGLE_LINK_RETURN_STORAGE_KEY = "aifix_sup_google_link_return"
 /** 초대 발송(428)으로 연동 플로우를 탄 경우, 복귀 후 초대 모달을 다시 연다 */
 export const SUP_GOOGLE_LINK_REOPEN_INVITE_MODAL_KEY = "aifix_sup_google_link_reopen_invite";
 
+/** Gmail 미연동(428) 직전 — 연동 후 자동 재발송할 협력사 초대 페이로드 배열 (JSON) */
+export const SUP_PENDING_INVITE_SEND_STORAGE_KEY = "aifix_pending_sup_invite_send";
+
 export function markReopenSupplierInviteModalAfterGoogleLink(): void {
   if (typeof window === "undefined") return;
   sessionStorage.setItem(SUP_GOOGLE_LINK_REOPEN_INVITE_MODAL_KEY, "1");

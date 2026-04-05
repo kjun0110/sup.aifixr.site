@@ -57,23 +57,22 @@ export function ProjectSelection() {
     const load = async () => {
       if (loadAttempted) return;
       loadAttempted = true;
-      
-      // 로그인 체크 (메모리 토큰)
-      const token = getSupAccessToken();
-      if (!token) {
-        console.log("로그인 토큰이 없습니다. 로그인 페이지로 이동합니다.");
-        router.push("/");
-        return;
-      }
 
       try {
+        // 로그인 체크 (메모리 토큰) — finally에서 로딩 해제
+        const token = getSupAccessToken();
+        if (!token) {
+          console.log("로그인 토큰이 없습니다. 로그인 페이지로 이동합니다.");
+          router.push("/");
+          return;
+        }
+
         const projects = await getMyProjects();
         if (mounted) {
           setRealProjects(projects);
         }
       } catch (error) {
         console.error("프로젝트 목록 조회 실패:", error);
-        // 401 에러면 로그인 페이지로 리다이렉트
         if (error instanceof Error && error.message?.includes("401")) {
           localStorage.clear();
           router.push("/");
@@ -109,7 +108,6 @@ export function ProjectSelection() {
     };
   }, [router]);
 
-  // Mock 데이터와 실제 데이터 합치기
   const allProjects = [...mockProjects, ...realProjects];
   return (
     <div>

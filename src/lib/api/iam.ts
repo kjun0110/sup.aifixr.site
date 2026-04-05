@@ -12,10 +12,13 @@ export async function submitSignup(
     company_name: string;
     rep_name: string;
     business_reg_no: string;
+    country_location?: string | null;
     address: string;
     name: string;
     contact: string;
     email: string;
+    department_name?: string | null;
+    position?: string | null;
     password: string;
     password_confirm: string;
     terms_agreed: boolean;
@@ -44,6 +47,7 @@ export async function submitGoogleSignup(
     company_name: string;
     rep_name: string;
     business_reg_no: string;
+    country_location?: string | null;
     address: string;
     name: string;
     contact: string;
@@ -113,6 +117,7 @@ export async function login(
     localStorage.setItem(actorStorageKey(), data.user.id);
     localStorage.setItem("user_id", data.user.id);
     localStorage.setItem("user_type", data.user.userType);
+    localStorage.setItem("sup_user_email", data.user.email);
     if (data.user.companyName) {
       localStorage.setItem("company_name", data.user.companyName);
     }

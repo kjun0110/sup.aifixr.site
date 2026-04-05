@@ -2,19 +2,30 @@
 
 import { useState, useEffect, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { Building2, User, Mail, Phone, Lock, Briefcase, ArrowLeft } from 'lucide-react';
+import { Building2, User, Mail, Phone, Lock, Briefcase, ArrowLeft, AlertCircle } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { cn } from '../ui/utils';
 import { Card, CardContent } from '../ui/card';
 import { Checkbox } from '../ui/checkbox';
 import { Input } from '../ui/input';
 import { getInvitationPreview } from '@/lib/api/invitation';
 import { submitSignup, submitGoogleSignup } from '@/lib/api/iam';
 
-const LS_REGISTERED_KEY = 'aifix_mock_registered';
 const LS_INVITE_KEY = 'aifix_mock_invite';
 
 type SignupMethod = 'none' | 'google' | 'email';
+
+/** 사업자등록번호: 숫자만 추출 */
+function businessRegDigitsOnly(raw: string): string {
+  return raw.replace(/\D/g, '');
+}
+
+/** 10자리 숫자 → 000-00-00000 (표시·저장용) */
+function formatBusinessRegNoForSubmit(digits10: string): string {
+  if (digits10.length !== 10) return digits10;
+  return `${digits10.slice(0, 3)}-${digits10.slice(3, 5)}-${digits10.slice(5)}`;
+}
 
 // Field 컴포넌트를 외부로 이동하여 재생성 방지
 const Field = ({
@@ -67,7 +78,8 @@ export function SignupRegister({ invite }: { invite?: string }) {
   const [companyName, setCompanyName] = useState('');
   const [representativeName, setRepresentativeName] = useState('');
   const [companyRegNumber, setCompanyRegNumber] = useState('');
-  const [companyLocation, setCompanyLocation] = useState('');
+  const [companyCountryLocation, setCompanyCountryLocation] = useState('');
+  const [companyAddressDetail, setCompanyAddressDetail] = useState('');
 
   const [contactName, setContactName] = useState('');
   const [contactDepartment, setContactDepartment] = useState('');
@@ -84,6 +96,13 @@ export function SignupRegister({ invite }: { invite?: string }) {
   const isGoogleSignup = signupMethod === 'google';
   // 초대받은 이메일을 항상 표시 (Google 연동 여부와 무관)
   const displayEmail = contactEmail;
+
+  const brnTrimmed = companyRegNumber.trim();
+  const brnHasInput = brnTrimmed.length > 0;
+  const brnOnlyDigitsAndHyphen = /^[\d-]*$/.test(brnTrimmed);
+  const brnDigitsCount = businessRegDigitsOnly(companyRegNumber).length;
+  const businessRegInvalid =
+    brnHasInput && (!brnOnlyDigitsAndHyphen || brnDigitsCount !== 10);
 
   // Google OAuth 콜백 처리
   useEffect(() => {
@@ -123,7 +142,10 @@ export function SignupRegister({ invite }: { invite?: string }) {
           setCompanyName(formData.companyName || '');
           setRepresentativeName(formData.representativeName || '');
           setCompanyRegNumber(formData.companyRegNumber || '');
-          setCompanyLocation(formData.companyLocation || '');
+          setCompanyCountryLocation(formData.companyCountryLocation || '');
+          setCompanyAddressDetail(
+            formData.companyAddressDetail || formData.companyLocation || '',
+          );
           // 초대받은 이메일 복원 (Google 이메일로 덮어쓰지 않음)
           setContactEmail(formData.contactEmail || '');
           setContactName(formData.contactName || googleName || '');
@@ -189,7 +211,16 @@ export function SignupRegister({ invite }: { invite?: string }) {
     if (!companyName.trim()) return '회사명을 입력해주세요.';
     if (!representativeName.trim()) return '대표자명을 입력해주세요.';
     if (!companyRegNumber.trim()) return '사업자등록번호를 입력해주세요.';
-    if (!companyLocation.trim()) return '소재지를 입력해주세요.';
+    const brnClean = companyRegNumber.trim();
+    if (!/^[\d-]+$/.test(brnClean)) {
+      return '사업자등록번호는 숫자와 하이픈(-)만 입력해 주세요.';
+    }
+    const brnDigits = businessRegDigitsOnly(companyRegNumber);
+    if (brnDigits.length !== 10) {
+      return '사업자등록번호는 숫자 10자리여야 합니다.';
+    }
+    if (!companyCountryLocation.trim()) return '국가소재지를 입력해주세요.';
+    if (!companyAddressDetail.trim()) return '상세주소를 입력해주세요.';
     if (!contactName.trim()) return '담당자 이름을 입력해주세요.';
     if (!displayEmail.trim()) return '이메일을 입력해주세요.';
     if (!contactPhone.trim()) return '연락처를 입력해주세요.';
@@ -221,7 +252,8 @@ export function SignupRegister({ invite }: { invite?: string }) {
           companyName,
           representativeName,
           companyRegNumber,
-          companyLocation,
+          companyCountryLocation,
+          companyAddressDetail,
           contactEmail, // 초대받은 이메일 저장
           contactName,
           contactDepartment,
@@ -235,8 +267,12 @@ export function SignupRegister({ invite }: { invite?: string }) {
         return;
       }
       
+      const businessRegNoNormalized = formatBusinessRegNoForSubmit(
+        businessRegDigitsOnly(companyRegNumber),
+      );
+
       let response;
-      
+
       if (isGoogleSignup && googleUserId && googleRefreshToken) {
         // Google OAuth 회원가입 (OAuth 인증 완료 후)
         response = await submitGoogleSignup(invite, {
@@ -247,8 +283,9 @@ export function SignupRegister({ invite }: { invite?: string }) {
           google_scope: googleScope,
           company_name: companyName,
           rep_name: representativeName,
-          business_reg_no: companyRegNumber,
-          address: companyLocation,
+          business_reg_no: businessRegNoNormalized,
+          country_location: companyCountryLocation.trim(),
+          address: companyAddressDetail.trim(),
           name: contactName,
           contact: contactPhone,
           department_name: contactDepartment || null,
@@ -260,11 +297,14 @@ export function SignupRegister({ invite }: { invite?: string }) {
         response = await submitSignup(invite, {
           company_name: companyName,
           rep_name: representativeName,
-          business_reg_no: companyRegNumber,
-          address: companyLocation,
+          business_reg_no: businessRegNoNormalized,
+          country_location: companyCountryLocation.trim(),
+          address: companyAddressDetail.trim(),
           name: contactName,
           contact: contactPhone,
           email: displayEmail,
+          department_name: contactDepartment.trim() || null,
+          position: contactPosition.trim() || null,
           password: password,
           password_confirm: passwordConfirm,
           terms_agreed: agreeAll,
@@ -273,7 +313,6 @@ export function SignupRegister({ invite }: { invite?: string }) {
 
       if (response.success) {
         alert(response.message || '회원가입 신청이 완료되었습니다. 직상위 차사 승인 후 로그인 가능합니다.');
-        localStorage.setItem(LS_REGISTERED_KEY, 'true');
         localStorage.setItem(LS_INVITE_KEY, invite);
         localStorage.removeItem('signup_form_data');
         
@@ -420,22 +459,65 @@ export function SignupRegister({ invite }: { invite?: string }) {
                   onChange={setRepresentativeName}
                   placeholder="예: 김철수"
                 />
-                <Field
-                  label="사업자등록번호"
-                  required
-                  icon={<Building2 className="w-4 h-4" />}
-                  value={companyRegNumber}
-                  onChange={setCompanyRegNumber}
-                  placeholder="000-00-00000"
-                />
-                <Field
-                  label="소재지"
-                  required
-                  icon={<Building2 className="w-4 h-4" />}
-                  value={companyLocation}
-                  onChange={setCompanyLocation}
-                  placeholder="예: 서울시 강남구 ..."
-                />
+                <div>
+                  <label className="block text-sm font-semibold text-gray-900 mb-2">
+                    사업자등록번호
+                    <span className="text-red-500 ml-1">*</span>
+                  </label>
+                  <div className="relative">
+                    <Building2
+                      className={cn(
+                        'pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2',
+                        businessRegInvalid ? 'text-red-400' : 'text-gray-400',
+                      )}
+                      aria-hidden
+                    />
+                    <Input
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={companyRegNumber}
+                      onChange={(e) => setCompanyRegNumber(e.target.value)}
+                      placeholder="000-00-00000 (숫자 10자리)"
+                      aria-invalid={businessRegInvalid}
+                      className={cn(
+                        'pl-10 bg-white',
+                        businessRegInvalid &&
+                          'border-red-500 focus-visible:border-red-600 focus-visible:ring-red-500/50',
+                      )}
+                    />
+                  </div>
+                  {businessRegInvalid ? (
+                    <p
+                      className="mt-1.5 flex items-start gap-1.5 text-xs text-red-600"
+                      role="alert"
+                    >
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+                      <span>
+                        숫자 10자리로 입력해 주세요. 하이픈(-)만 추가로 사용할 수 있으며, 그 외 문자는 입력할 수
+                        없습니다.
+                      </span>
+                    </p>
+                  ) : null}
+                </div>
+                <div className="col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <Field
+                    label="국가소재지"
+                    required
+                    icon={<Building2 className="w-4 h-4" />}
+                    value={companyCountryLocation}
+                    onChange={setCompanyCountryLocation}
+                    placeholder="예: 대한민국"
+                  />
+                  <Field
+                    label="상세주소"
+                    required
+                    icon={<Building2 className="w-4 h-4" />}
+                    value={companyAddressDetail}
+                    onChange={setCompanyAddressDetail}
+                    placeholder="예: 경기도 성남시 분당구 판교로 …"
+                  />
+                </div>
               </div>
             </div>
 

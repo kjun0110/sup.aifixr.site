@@ -21,7 +21,13 @@ import {
   SupplierInviteModal,
   type SupplierInviteContext,
 } from "./shared/SupplierInviteModal";
-import { getRegisteredDirectChildren, postRegisterDirectChild } from "../../lib/api/supply-chain";
+import {
+  getMySupplyChainSubtree,
+  getRegisteredDirectChildren,
+  postRegisterDirectChild,
+  type SupplierSubtreeNode,
+  type SupplierSubtreeResponse,
+} from "../../lib/api/supply-chain";
 
 type CompanyNode = {
   id: string;
@@ -74,6 +80,89 @@ const MOCK_COMPANY_DIRECTORY: CompanyDirectoryItem[] = [
   { id: "tier4-1", name: "켐텍소재", tier: "tier4", taxId: "410-01-11111" },
 ];
 
+function apiTierToCompanyTier(t: number): CompanyNode["tier"] {
+  const x = Math.max(1, Math.min(4, t || 1));
+  return `tier${x}` as CompanyNode["tier"];
+}
+
+function tableStatusFromApi(dbStatus: string): Company["status"] {
+  if (dbStatus === "approved") return "제출완료";
+  return "미제출";
+}
+
+function mapSubtreeChild(n: SupplierSubtreeNode, parentKey: string): CompanyNode {
+  return {
+    id: `node-${n.supply_chain_node_id}`,
+    name: n.company_name,
+    tier: apiTierToCompanyTier(n.tier),
+    status: n.tree_status as CompanyNode["status"],
+    parentId: parentKey,
+    children: n.children.map((c) => mapSubtreeChild(c, `node-${n.supply_chain_node_id}`)),
+  };
+}
+
+function buildTreeFromApi(sub: SupplierSubtreeResponse): CompanyNode {
+  const parentTier = sub.parent.display_tier as CompanyNode["tier"];
+  if (!sub.me) {
+    return {
+      id: "root",
+      name: sub.parent.label,
+      tier: parentTier,
+      status: "submitted",
+      children: [
+        {
+          id: "pending-me",
+          name: "공급망 승인 후 내 노드가 표시됩니다",
+          tier: "tier1",
+          status: "pending",
+          parentId: "root",
+        },
+      ],
+    };
+  }
+  const meNode: CompanyNode = {
+    id: `node-${sub.me.supply_chain_node_id}`,
+    name: `${sub.me.company_name} (나)`,
+    tier: apiTierToCompanyTier(sub.me.tier),
+    status: sub.me.tree_status as CompanyNode["status"],
+    parentId: "root",
+    children: sub.me.children.map((c) =>
+      mapSubtreeChild(c, `node-${sub.me!.supply_chain_node_id}`),
+    ),
+  };
+  return {
+    id: "root",
+    name: sub.parent.label,
+    tier: parentTier,
+    status: "submitted",
+    children: [meNode],
+  };
+}
+
+function flattenDescendantsForTable(nodes: SupplierSubtreeNode[]): Company[] {
+  const out: Company[] = [];
+  const walk = (n: SupplierSubtreeNode) => {
+    out.push({
+      id: `node-${n.supply_chain_node_id}`,
+      name: n.company_name,
+      tier: `${Math.max(1, n.tier || 1)}차`,
+      status: tableStatusFromApi(n.status),
+      lastSubmit: "-",
+      dueDate: "-",
+      daysLeft: 0,
+      revisionRequested: false,
+    });
+    n.children.forEach(walk);
+  };
+  nodes.forEach(walk);
+  return out;
+}
+
+function collectTreeNodeIds(node: CompanyNode, acc: string[]) {
+  acc.push(node.id);
+  node.children?.forEach((c) => collectTreeNodeIds(c, acc));
+}
+
 export function SupplyChainManagement({
   tier,
   inviteContext,
@@ -106,6 +195,30 @@ export function SupplyChainManagement({
   const [registerContractEnd, setRegisterContractEnd] = useState("");
   const [registerMonthlyQty, setRegisterMonthlyQty] = useState("");
   const [registerUnit, setRegisterUnit] = useState("");
+  const [apiSubtree, setApiSubtree] = useState<SupplierSubtreeResponse | null>(null);
+
+  const useApiTree =
+    inviteContext?.projectId != null &&
+    typeof projectId === "string" &&
+    projectId.startsWith("real-");
+
+  const loadSubtree = useCallback(async () => {
+    if (inviteContext?.projectId == null) return;
+    try {
+      const s = await getMySupplyChainSubtree(inviteContext.projectId);
+      setApiSubtree(s);
+    } catch {
+      setApiSubtree(null);
+    }
+  }, [inviteContext?.projectId]);
+
+  useEffect(() => {
+    if (!useApiTree) {
+      setApiSubtree(null);
+      return;
+    }
+    void loadSubtree();
+  }, [useApiTree, loadSubtree, registeredChildrenTick]);
 
   const fetchRegisteredChildren = useCallback(async () => {
     if (inviteContext?.projectId == null) return [];
@@ -329,14 +442,34 @@ export function SupplyChainManagement({
     }
   };
 
-  const baseTreeData = useMemo(() => getTreeData(), [tier, projectId]);
+  const baseTreeData = useMemo((): CompanyNode => {
+    if (useApiTree) {
+      if (apiSubtree) return buildTreeFromApi(apiSubtree);
+      return {
+        id: "root",
+        name: "공급망 정보를 불러오는 중…",
+        tier: "tier0",
+        status: "pending",
+        children: [],
+      };
+    }
+    return getTreeData();
+  }, [useApiTree, apiSubtree, tier, projectId]);
+
   const treeData = useMemo(() => {
-    if (extraTreeChildren.length === 0) return baseTreeData;
+    if (useApiTree || extraTreeChildren.length === 0) return baseTreeData;
     return {
       ...baseTreeData,
       children: [...(baseTreeData.children ?? []), ...extraTreeChildren],
     };
-  }, [baseTreeData, extraTreeChildren]);
+  }, [baseTreeData, extraTreeChildren, useApiTree]);
+
+  useEffect(() => {
+    if (!useApiTree || !apiSubtree) return;
+    const acc: string[] = [];
+    collectTreeNodeIds(buildTreeFromApi(apiSubtree), acc);
+    setExpandedNodes(new Set(acc));
+  }, [useApiTree, apiSubtree]);
 
   const getRequestIndicator = (id: string) => {
     const st = requestStatusById[id];
@@ -400,7 +533,13 @@ export function SupplyChainManagement({
     }
   };
 
-  const allCompaniesBase = useMemo(() => getAllCompanies(), [tier, projectId]);
+  const allCompaniesBase = useMemo(() => {
+    if (useApiTree) {
+      if (apiSubtree?.me) return flattenDescendantsForTable(apiSubtree.me.children);
+      return [];
+    }
+    return getAllCompanies();
+  }, [useApiTree, apiSubtree, tier, projectId]);
   const allCompanies = [...allCompaniesBase, ...extraCompanies];
 
   const toggleNode = (nodeId: string) => {
@@ -598,6 +737,12 @@ export function SupplyChainManagement({
                   fontWeight: 600
                 }}
                 onClick={() => {
+                  if (useApiTree) {
+                    const acc: string[] = [];
+                    collectTreeNodeIds(treeData, acc);
+                    setExpandedNodes(new Set(acc));
+                    return;
+                  }
                   const allNodeIds = tier === "tier1"
                     ? (projectId === "p1" ? ["root", "tier1-1", "tier2-1", "tier3-1"] : ["root", "tier1-1", "tier1-2", "tier2-1", "tier3-1"])
                     : tier === "tier2"

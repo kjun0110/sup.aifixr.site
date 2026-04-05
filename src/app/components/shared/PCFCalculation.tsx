@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { toast } from "sonner";
 import { 
   Play,
   RefreshCw,
@@ -9,15 +10,11 @@ import {
   AlertTriangle,
   AlertCircle,
   XCircle,
-  TrendingUp,
   BarChart3,
   Clock,
-  Building2,
   Info,
-  Calendar,
   ChevronDown,
   ChevronUp,
-  Eye,
   FileText,
   Activity
 } from "lucide-react";
@@ -53,17 +50,76 @@ interface ComputationTreeNode {
   expanded?: boolean;
 }
 
+/** 협력사 포털: 조회월×티어별 PCF 단계 (브라우저 저장 — 추후 서버 산정·전송 API 연동) */
+const SUP_PCF_MONTH_RUN_KEY = 'aifix_sup_pcf_month_run_state_v1';
+
+function periodToYm(period: string): string | null {
+  const m = period.match(/(\d{4})\s*년\s*(\d{1,2})\s*월/);
+  if (!m) return null;
+  return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, '0')}`;
+}
+
+function supPcfRunMapKey(tier: TierType, ym: string): string {
+  return `${tier}|${ym}`;
+}
+
+type SupPcfMonthStored = { partial?: boolean; final?: boolean; transmitted?: boolean };
+
+function readSupMonthRunState(tier: TierType, ym: string): SupPcfMonthStored {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(SUP_PCF_MONTH_RUN_KEY);
+    const o = raw ? (JSON.parse(raw) as Record<string, SupPcfMonthStored>) : {};
+    return o[supPcfRunMapKey(tier, ym)] ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSupMonthRunState(tier: TierType, ym: string, patch: Partial<SupPcfMonthStored>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(SUP_PCF_MONTH_RUN_KEY);
+    const o = raw ? (JSON.parse(raw) as Record<string, SupPcfMonthStored>) : {};
+    const k = supPcfRunMapKey(tier, ym);
+    o[k] = { ...o[k], ...patch };
+    localStorage.setItem(SUP_PCF_MONTH_RUN_KEY, JSON.stringify(o));
+  } catch {
+    /* ignore */
+  }
+}
+
+function defaultPreviousMonthKorean(): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() - 1);
+  return `${d.getFullYear()}년 ${d.getMonth() + 1}월`;
+}
+
 export function PCFCalculation({ tier }: PCFCalculationProps) {
-  const [isCalculated, setIsCalculated] = useState(true);
   const [isTransmitted, setIsTransmitted] = useState(false);
-  const [selectedPeriod, setSelectedPeriod] = useState("2026년 1월");
+  const [lastRun, setLastRun] = useState<'none' | 'partial' | 'final'>('none');
+  const [selectedPeriod, setSelectedPeriod] = useState(defaultPreviousMonthKorean);
   const [selectedResult, setSelectedResult] = useState<string | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set(["root", "supplier-group"]));
+  /** 추후 PCF 준비도 API로 대체 (원청과 동일: 자사 완료 → 부분산정, 하위까지 완료 → 최종산정) */
   const [readinessStatus, setReadinessStatus] = useState<"complete" | "partial" | "incomplete">("partial");
 
   const tierName = tier === "tier1" ? "1차" : tier === "tier2" ? "2차" : "3차";
   const hasDownstream = tier === "tier1" || tier === "tier2";
   const upperCompanyName = tier === "tier1" ? "원청사 A" : tier === "tier2" ? "상위 1차 협력사" : "상위 2차 협력사";
+
+  const ym = periodToYm(selectedPeriod);
+
+  useEffect(() => {
+    if (!ym) {
+      setLastRun('none');
+      setIsTransmitted(false);
+      return;
+    }
+    const s = readSupMonthRunState(tier, ym);
+    setLastRun(s.final ? 'final' : s.partial ? 'partial' : 'none');
+    setIsTransmitted(!!s.transmitted);
+  }, [ym, tier]);
 
   // 준비 상태에 따른 카드 데이터
   const getReadinessCards = () => {
@@ -657,19 +713,56 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
     );
   };
 
-  const canCalculate = readinessStatus === "complete";
-  const canTransmit = isCalculated && !isTransmitted;
-  
+  const ownDataReady = readinessStatus !== "incomplete";
+  const downstreamAllReady = !hasDownstream || readinessStatus === "complete";
+  const canPartialCalculate = !!ym && ownDataReady;
+  const canFinalCalculate = !!ym && ownDataReady && downstreamAllReady;
+  const canTransmit = lastRun === "final" && !isTransmitted;
+
   const getWarningMessage = () => {
     if (readinessStatus === "incomplete") {
-      return "PCF 계산을 위해 필요한 당사의 데이터가 입력이 완료되지 않았습니다.";
-    } else if (readinessStatus === "partial" && hasDownstream) {
-      return "당사의 데이터는 입력이 완료되었습니다만, 하위 협력사가 PCF 데이터 제출이 아직 완료되지 않았습니다.";
+      return "PCF 산정을 위해 필요한 당사 데이터 입력이 완료되지 않았습니다.";
+    }
+    if (readinessStatus === "partial" && hasDownstream) {
+      return "당사 데이터는 준비되었습니다. 하위 협력사 데이터 전송이 모두 완료되기 전까지는 부분 산정(자사 데이터만)만 실행할 수 있으며, 최종 산정·상위 전송은 하위 완료 후 가능합니다.";
     }
     return null;
   };
-  
-  const hasWarning = readinessStatus !== "complete";
+
+  const hasWarning =
+    readinessStatus === "incomplete" || (readinessStatus === "partial" && hasDownstream);
+
+  const handlePartialCalculate = () => {
+    if (!ym || !canPartialCalculate) {
+      toast.error("부분산정 조건이 충족되지 않았습니다.");
+      return;
+    }
+    writeSupMonthRunState(tier, ym, { partial: true, final: false, transmitted: false });
+    setLastRun("partial");
+    setIsTransmitted(false);
+    toast.success("부분산정을 실행합니다 (자사 데이터만 반영)");
+  };
+
+  const handleFinalCalculate = () => {
+    if (!ym || !canFinalCalculate) {
+      toast.error("최종산정 조건이 충족되지 않았습니다.");
+      return;
+    }
+    writeSupMonthRunState(tier, ym, { partial: true, final: true, transmitted: false });
+    setLastRun("final");
+    setIsTransmitted(false);
+    toast.success("최종 PCF 산정을 실행합니다 (하위 데이터 포함)");
+  };
+
+  const handleTransmit = () => {
+    if (!ym || !canTransmit) {
+      toast.error("최종 산정 완료 후에만 상위로 전송할 수 있습니다.");
+      return;
+    }
+    writeSupMonthRunState(tier, ym, { transmitted: true });
+    setIsTransmitted(true);
+    toast.success(`${upperCompanyName}로 PCF 결과를 전송했습니다 (추후 API 연동)`);
+  };
 
   if (selectedResult) {
     const computationTree = getComputationTree();
@@ -1034,6 +1127,25 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
           })}
         </div>
 
+        <p style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '12px', lineHeight: 1.5 }}>
+          원청사 PCF 화면과 동일하게, 월별로 자사 데이터만으로 부분 산정을 할 수 있고 하위 협력사 데이터 전송이 모두 완료되면 최종 산정 후 상위로 전송할 수 있습니다. 아래 준비도는 추후 API 연동 시 자동 반영됩니다.
+          {hasDownstream && (
+            <>
+              {' '}
+              <button
+                type="button"
+                onClick={() =>
+                  setReadinessStatus((s) => (s === 'complete' ? 'partial' : 'complete'))
+                }
+                className="underline decoration-dotted underline-offset-2"
+                style={{ color: '#00838F', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                (데모) 하위 전송 {readinessStatus === 'complete' ? '미완' : '완료'}으로 전환
+              </button>
+            </>
+          )}
+        </p>
+
         {hasWarning && getWarningMessage() && (
           <div 
             className="p-4 rounded-lg flex items-start gap-3"
@@ -1046,26 +1158,64 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
           </div>
         )}
 
-        {/* PCF 계산 실행 버튼 */}
-        <div className="flex items-center gap-3 mt-4">
+        {/* 부분 산정 / 최종 산정 / 상위 전송 (원청사 PCF와 동일 규칙) */}
+        <div className="flex flex-wrap items-center gap-3 mt-4">
           <button
-            onClick={() => setIsCalculated(!isCalculated)}
-            disabled={!canCalculate}
+            type="button"
+            onClick={handlePartialCalculate}
+            disabled={!canPartialCalculate}
             className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all"
             style={{
-              backgroundColor: canCalculate ? '#5B3BFA' : '#E0E0E0',
-              color: canCalculate ? 'white' : '#9E9E9E',
+              backgroundColor: canPartialCalculate ? '#5B3BFA' : '#E0E0E0',
+              color: canPartialCalculate ? 'white' : '#9E9E9E',
               fontWeight: 600,
-              cursor: canCalculate ? 'pointer' : 'not-allowed',
+              cursor: canPartialCalculate ? 'pointer' : 'not-allowed',
               border: 'none',
-              opacity: canCalculate ? 1 : 0.6
+              opacity: canPartialCalculate ? 1 : 0.6
             }}
           >
             <Play className="w-5 h-5" />
-            PCF 계산 실행
+            부분 PCF 산정
           </button>
 
           <button
+            type="button"
+            onClick={handleFinalCalculate}
+            disabled={!canFinalCalculate}
+            className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all"
+            style={{
+              backgroundColor: canFinalCalculate ? '#00897B' : '#E0E0E0',
+              color: canFinalCalculate ? 'white' : '#9E9E9E',
+              fontWeight: 600,
+              cursor: canFinalCalculate ? 'pointer' : 'not-allowed',
+              border: 'none',
+              opacity: canFinalCalculate ? 1 : 0.6
+            }}
+          >
+            <CheckCircle className="w-5 h-5" />
+            최종 PCF 산정
+          </button>
+
+          <button
+            type="button"
+            onClick={handleTransmit}
+            disabled={!canTransmit}
+            className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all"
+            style={{
+              backgroundColor: canTransmit ? '#1565C0' : '#E0E0E0',
+              color: canTransmit ? 'white' : '#9E9E9E',
+              fontWeight: 600,
+              cursor: canTransmit ? 'pointer' : 'not-allowed',
+              border: 'none',
+              opacity: canTransmit ? 1 : 0.6
+            }}
+          >
+            <Send className="w-5 h-5" />
+            PCF 결과 전송
+          </button>
+
+          <button
+            type="button"
             className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all"
             style={{
               backgroundColor: 'white',
@@ -1077,47 +1227,22 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
             <BarChart3 className="w-5 h-5" />
             결과 비교
           </button>
+        </div>
 
-          <div className="flex-1" />
-          <button
-            onClick={() => setReadinessStatus("complete")}
-            className="px-3 py-1.5 rounded-lg text-sm transition-all"
-            style={{
-              backgroundColor: readinessStatus === "complete" ? '#E8F5E9' : 'white',
-              color: readinessStatus === "complete" ? '#4CAF50' : '#9E9E9E',
-              fontWeight: 600,
-              border: readinessStatus === "complete" ? 'none' : '1px solid #E0E0E0',
-              cursor: 'pointer'
-            }}
-          >
-            완료
-          </button>
-          <button
-            onClick={() => setReadinessStatus("partial")}
-            className="px-3 py-1.5 rounded-lg text-sm transition-all"
-            style={{
-              backgroundColor: readinessStatus === "partial" ? '#FFF4E6' : 'white',
-              color: readinessStatus === "partial" ? '#FF9800' : '#9E9E9E',
-              fontWeight: 600,
-              border: readinessStatus === "partial" ? 'none' : '1px solid #E0E0E0',
-              cursor: 'pointer'
-            }}
-          >
-            부분 완료
-          </button>
-          <button
-            onClick={() => setReadinessStatus("incomplete")}
-            className="px-3 py-1.5 rounded-lg text-sm transition-all"
-            style={{
-              backgroundColor: readinessStatus === "incomplete" ? '#FFEBEE' : 'white',
-              color: readinessStatus === "incomplete" ? '#F44336' : '#9E9E9E',
-              fontWeight: 600,
-              border: readinessStatus === "incomplete" ? 'none' : '1px solid #E0E0E0',
-              cursor: 'pointer'
-            }}
-          >
-            미완료
-          </button>
+        <div className="mt-3 space-y-1" style={{ fontSize: '12px', color: 'var(--aifix-gray)' }}>
+          {!hasDownstream && (
+            <p>3차 협력사는 하위가 없으므로 자사 데이터만으로 부분·최종 산정을 모두 실행할 수 있으며, 최종 산정 후 상위로 전송할 수 있습니다.</p>
+          )}
+          {lastRun === 'partial' && hasDownstream && !isTransmitted && (
+            <p style={{ color: '#E65100', fontWeight: 600 }}>
+              이번 달 부분 산정을 실행했습니다. 하위 데이터가 모두 도착하면 최종 산정 후 &quot;PCF 결과 전송&quot;을 진행하세요.
+            </p>
+          )}
+          {lastRun === 'final' && isTransmitted && (
+            <p style={{ color: '#2E7D32', fontWeight: 600 }}>
+              최종 산정 후 {upperCompanyName}로 전송을 완료했습니다 (이번 조회월 기준).
+            </p>
+          )}
         </div>
       </div>
 

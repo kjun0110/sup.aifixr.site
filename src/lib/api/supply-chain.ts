@@ -7,6 +7,8 @@ export const SUPPLY_CHAIN_BASE = API_PREFIX.SUPPLY_CHAIN;
 export interface SupplierProject {
   id: string;
   project_id: number;
+  /** data-mgmt 공급망 트리 등에 사용 (초대·변형에서 유도) */
+  product_id?: number | null;
   name: string;
   clientName: string;
   productName: string;
@@ -72,5 +74,30 @@ export async function postRegisterDirectChild(
       method: "POST",
       json: body,
     },
+  );
+}
+
+/** KJ GET .../my-supply-subtree — 직상위 + 본인 + 하위 전체 */
+export type SupplierSubtreeNode = {
+  supply_chain_node_id: number;
+  supplier_id: number;
+  company_name: string;
+  tier: number;
+  status: string;
+  node_code: string | null;
+  tree_status: string;
+  children: SupplierSubtreeNode[];
+};
+
+export type SupplierSubtreeResponse = {
+  parent: { label: string; kind: string; display_tier: string };
+  me: SupplierSubtreeNode | null;
+};
+
+export async function getMySupplyChainSubtree(
+  projectId: number,
+): Promise<SupplierSubtreeResponse> {
+  return apiFetch<SupplierSubtreeResponse>(
+    `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}/my-supply-subtree`,
   );
 }

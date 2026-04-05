@@ -2,8 +2,17 @@
 
 import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { restoreSupSessionFromCookie } from "@/lib/api/client";
-import { getMySupplierProfile, type SupplierProfileMe } from "@/lib/api/supplierProfile";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
+import {
+  restoreSupSessionFromCookie,
+  AIFIXR_SESSION_UPDATED_EVENT,
+} from "@/lib/api/client";
+import {
+  getMySupplierProfile,
+  patchMySupplierProfile,
+  type SupplierProfileMe,
+} from "@/lib/api/supplierProfile";
 import { useSites } from "../contexts/SiteContext";
 import type { Site } from "../contexts/SiteContext";
 
@@ -12,7 +21,7 @@ type ProfileTab = 'basic' | 'contacts' | 'sites';
 /** 탭 전환 시 표 위에 표시하는 안내 (선택한 영역의 역할을 바로 이해하도록) */
 const TAB_DESCRIPTIONS: Record<ProfileTab, string> = {
   basic:
-    '기본정보 수정은 원청사 담당자(aaa@aaa.com)에게 문의 바랍니다.',
+    '회원가입 시 등록한 정보가 표시됩니다. 아래 항목을 수정한 뒤 저장하면 반영됩니다.',
   contacts:
     '본 시스템에 가입한 직원 정보입니다. 회원가입 시 자동 반영 됩니다.',
   sites:
@@ -26,12 +35,100 @@ const PROFILE_TD = 'border border-gray-300 py-4 px-4 align-top text-sm text-[var
 const PROFILE_TD_LABEL =
   'border border-gray-300 bg-[#F9FAFB] py-4 px-4 align-top text-sm font-medium text-[var(--aifix-gray)]';
 
-function dash(s: string | null | undefined): string {
-  const t = (s ?? "").trim();
-  return t.length > 0 ? t : "—";
+/** 회사 프로필·백엔드 `supplier_type`에 저장되는 공급자 유형 (4택1) */
+const SUPPLIER_TYPE_SMELTER = '가공사/제련사' as const;
+
+const SUPPLIER_TYPE_OPTIONS: { value: string; title: string; hint: string }[] = [
+  {
+    value: '제조사',
+    title: '제조사',
+    hint: '원료·부품을 가공·조립해 제품을 만드는 사업자 (예: 양극재 제조, 셀 조립)',
+  },
+  {
+    value: SUPPLIER_TYPE_SMELTER,
+    title: '가공사/제련사',
+    hint: '광물을 제련·정제하거나 전구체 등을 가공하는 사업자 (예: 리튬 제련, 전구체 가공)',
+  },
+  {
+    value: '유통/물류',
+    title: '유통/물류',
+    hint: '직접 생산 없이 유통·물류만 담당하는 사업자 (예: 화학 유통, 물류센터)',
+  },
+  {
+    value: '채굴사',
+    title: '채굴사',
+    hint: '천연자원을 직접 채굴하는 사업자 (예: 리튬·니켈 광산)',
+  },
+];
+
+function isSmelterSupplierType(supplierType: string): boolean {
+  return supplierType.trim() === SUPPLIER_TYPE_SMELTER;
 }
 
-type BasicRow = { label: string; required?: boolean; value: string; isLink?: boolean };
+function isKnownSupplierType(supplierType: string): boolean {
+  const t = supplierType.trim();
+  return SUPPLIER_TYPE_OPTIONS.some((o) => o.value === t);
+}
+
+type BasicFormState = {
+  company_name: string;
+  business_reg_no: string;
+  country_location: string;
+  address: string;
+  duns_number: string;
+  tax_id: string;
+  website_url: string;
+  rep_name: string;
+  rep_email: string;
+  rep_phone: string;
+  supplier_type: string;
+  rmi_certified: string;
+  feoc_status: string;
+};
+
+const EMPTY_BASIC_FORM: BasicFormState = {
+  company_name: '',
+  business_reg_no: '',
+  country_location: '',
+  address: '',
+  duns_number: '',
+  tax_id: '',
+  website_url: '',
+  rep_name: '',
+  rep_email: '',
+  rep_phone: '',
+  supplier_type: '',
+  rmi_certified: '',
+  feoc_status: '',
+};
+
+/** 기업 기본정보에 국가만 비어 있고 주소에 국가명이 포함된 경우(예: 대한민국 충청북도…) 사업장 국가 필드 보조 */
+function deriveCountryFromAddress(address: string): string {
+  const t = address.trim();
+  if (!t) return '';
+  if (/^대한민국\b/.test(t)) return '대한민국';
+  if (/^한국\b/.test(t)) return '대한민국';
+  if (/^(Republic of Korea|South Korea)\b/i.test(t)) return '대한민국';
+  return '';
+}
+
+function profileToBasicForm(p: SupplierProfileMe): BasicFormState {
+  return {
+    company_name: p.company_name ?? '',
+    business_reg_no: p.business_reg_no ?? '',
+    country_location: p.country_location ?? '',
+    address: (p.address ?? '').trim(),
+    duns_number: p.duns_number ?? '',
+    tax_id: p.tax_id ?? '',
+    website_url: p.website_url ?? '',
+    rep_name: (p.rep_name ?? '').trim(),
+    rep_email: p.rep_email ?? '',
+    rep_phone: p.rep_phone ?? '',
+    supplier_type: p.supplier_type ?? '',
+    rmi_certified: p.rmi_certified ?? '',
+    feoc_status: p.feoc_status ?? '',
+  };
+}
 
 type ContactRow = {
   department: string;
@@ -42,15 +139,19 @@ type ContactRow = {
 };
 
 export function CompanyProfile() {
+  const router = useRouter();
   const { sites, addSite } = useSites();
   const [activeTab, setActiveTab] = useState<ProfileTab>('basic');
   const [profile, setProfile] = useState<SupplierProfileMe | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [basicForm, setBasicForm] = useState<BasicFormState>(EMPTY_BASIC_FORM);
+  const [basicSaving, setBasicSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+
+    const loadProfile = async () => {
       setProfileLoading(true);
       setProfileError(null);
       try {
@@ -58,54 +159,42 @@ export function CompanyProfile() {
         const data = await getMySupplierProfile();
         if (!cancelled) setProfile(data);
       } catch (e) {
+        const msg = e instanceof Error ? e.message : "";
+        if (msg.includes("401")) {
+          if (!cancelled) router.replace("/");
+          return;
+        }
         if (!cancelled) {
           setProfile(null);
-          setProfileError(e instanceof Error ? e.message : "프로필을 불러오지 못했습니다.");
+          setProfileError(msg || "프로필을 불러오지 못했습니다.");
         }
       } finally {
         if (!cancelled) setProfileLoading(false);
       }
-    })();
+    };
+
+    void loadProfile();
+
+    const onSession = () => {
+      void loadProfile();
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+    }
     return () => {
       cancelled = true;
+      if (typeof window !== "undefined") {
+        window.removeEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+      }
     };
-  }, []);
+  }, [router]);
 
-  const basicRows: BasicRow[] = useMemo(() => {
-    const p = profile;
-    if (!p?.has_profile) {
-      const empty = "—";
-      return [
-        { label: "회사명", required: true, value: empty },
-        { label: "사업자등록번호", required: true, value: empty },
-        { label: "국가 소재지", value: empty },
-        { label: "상세주소", value: empty },
-        { label: "DUNS Number", value: empty },
-        { label: "텍스 ID", value: empty },
-        { label: "공식 홈페이지 주소", value: empty },
-        { label: "대표자명", required: true, value: empty },
-        { label: "대표 이메일", value: empty },
-        { label: "대표 연락처", value: empty },
-        { label: "공급자 유형", value: empty },
-        { label: "RMI 인증 여부", value: empty },
-        { label: "FEOC 여부", value: empty },
-      ];
+  useEffect(() => {
+    if (profile?.has_profile) {
+      setBasicForm(profileToBasicForm(profile));
+    } else {
+      setBasicForm(EMPTY_BASIC_FORM);
     }
-    return [
-      { label: "회사명", required: true, value: dash(p.company_name) },
-      { label: "사업자등록번호", required: true, value: dash(p.business_reg_no) },
-      { label: "국가 소재지", value: "—" },
-      { label: "상세주소", value: dash(p.address) },
-      { label: "DUNS Number", value: "—" },
-      { label: "텍스 ID", value: "—" },
-      { label: "공식 홈페이지 주소", value: "—" },
-      { label: "대표자명", required: true, value: dash(p.rep_name) },
-      { label: "대표 이메일", value: "—" },
-      { label: "대표 연락처", value: "—" },
-      { label: "공급자 유형", value: "—" },
-      { label: "RMI 인증 여부", value: "—" },
-      { label: "FEOC 여부", value: "—" },
-    ];
   }, [profile]);
 
   const contacts: ContactRow[] = useMemo(() => {
@@ -152,28 +241,83 @@ export function CompanyProfile() {
   };
 
   const companyRegistrationNumber =
-    profile?.has_profile && profile.business_reg_no.trim()
-      ? profile.business_reg_no.trim()
-      : "";
-
-  const labelValue = (label: string) =>
-    basicRows.find((r) => r.label === label)?.value ?? "—";
+    basicForm.business_reg_no.trim() || (profile?.business_reg_no ?? "").trim() || "";
 
   const fillSiteFromCompanyBasic = () => {
     if (!profile?.has_profile) return;
-    setNewSite((prev) => ({
-      ...prev,
-      id: profile.business_reg_no?.trim() || prev.id,
-      name: profile.company_name?.trim() || prev.name,
-      country: "",
-      address: (profile.address ?? "").trim() || prev.address,
-      representative: (profile.rep_name ?? "").trim() || prev.representative,
-      email: (profile.email ?? "").trim() || prev.email,
-      phone: (profile.contact ?? "").trim() || prev.phone,
-      rmiSmelter: labelValue("RMI 인증 여부"),
-      feoc: labelValue("FEOC 여부"),
-    }));
+    setNewSite((prev) => {
+      const addr = (basicForm.address || profile.address || '').trim();
+      const loc = (basicForm.country_location || profile.country_location || '').trim();
+      const countryVal = loc || deriveCountryFromAddress(addr);
+      return {
+        ...prev,
+        id: basicForm.business_reg_no.trim() || prev.id,
+        name: basicForm.company_name.trim() || prev.name,
+        country: countryVal || prev.country,
+        address: addr || prev.address,
+        representative: basicForm.rep_name.trim() || prev.representative,
+        email: basicForm.rep_email.trim() || prev.email,
+        phone: basicForm.rep_phone.trim() || prev.phone,
+        rmiSmelter: basicForm.rmi_certified.trim() || prev.rmiSmelter,
+        feoc: basicForm.feoc_status.trim() || prev.feoc,
+      };
+    });
   };
+
+  const handleSaveBasic = async () => {
+    if (!profile?.has_profile) return;
+    if (!basicForm.company_name.trim() || !basicForm.business_reg_no.trim()) {
+      toast.error('회사명과 사업자등록번호는 필수입니다.');
+      return;
+    }
+    setBasicSaving(true);
+    try {
+      await restoreSupSessionFromCookie();
+      const smelter = isSmelterSupplierType(basicForm.supplier_type);
+      const updated = await patchMySupplierProfile({
+        company_name: basicForm.company_name.trim(),
+        business_reg_no: basicForm.business_reg_no.trim(),
+        rep_name: basicForm.rep_name.trim() || null,
+        address: basicForm.address.trim() || null,
+        country_location: basicForm.country_location.trim(),
+        duns_number: basicForm.duns_number.trim(),
+        tax_id: basicForm.tax_id.trim(),
+        website_url: basicForm.website_url.trim(),
+        rep_email: basicForm.rep_email.trim(),
+        rep_phone: basicForm.rep_phone.trim(),
+        supplier_type: basicForm.supplier_type.trim(),
+        rmi_certified: smelter ? basicForm.rmi_certified.trim() : '',
+        feoc_status: basicForm.feoc_status.trim(),
+      });
+      setProfile(updated);
+      toast.success('회사 기본정보를 저장했습니다.');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '저장에 실패했습니다.');
+    } finally {
+      setBasicSaving(false);
+    }
+  };
+
+  const basicFieldRows: { key: keyof BasicFormState; label: string; required?: boolean; type?: string; placeholder?: string }[] = [
+    { key: 'company_name', label: '회사명', required: true },
+    { key: 'business_reg_no', label: '사업자등록번호', required: true },
+    { key: 'country_location', label: '국가 소재지', placeholder: '예: 대한민국' },
+    { key: 'address', label: '상세주소' },
+    { key: 'duns_number', label: 'DUNS Number' },
+    { key: 'tax_id', label: '택스 ID' },
+    { key: 'website_url', label: '공식 홈페이지 주소', type: 'url', placeholder: 'https://' },
+    { key: 'rep_name', label: '대표자명', required: true },
+    { key: 'rep_email', label: '대표 이메일', type: 'email' },
+    { key: 'rep_phone', label: '대표 연락처', type: 'tel' },
+  ];
+
+  const feocRow = {
+    key: 'feoc_status' as const,
+    label: 'FEOC 여부',
+    placeholder: '예: 해당 / 미해당',
+  };
+
+  const showRmiField = isSmelterSupplierType(basicForm.supplier_type);
 
   const handleAddSite = () => {
     if (!newSite.id || !newSite.name) {
@@ -242,37 +386,173 @@ export function CompanyProfile() {
 
         <div className="p-8 pt-6">
           {activeTab === 'basic' && (
-            <div className="overflow-x-auto rounded-xl border border-gray-200">
+            <div className="space-y-4">
               {profileLoading ? (
                 <div className="px-4 py-8 text-sm text-gray-500">프로필 불러오는 중…</div>
-              ) : (
-                <table className={PROFILE_TABLE}>
-                  <tbody>
-                    {basicRows.map((row) => (
-                      <tr key={row.label}>
-                        <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
-                          {row.label}
-                        </td>
-                        <td className={PROFILE_TD}>
-                          {row.label === '공식 홈페이지 주소' &&
-                          row.value !== '—' &&
-                          row.value.startsWith('http') ? (
-                            <a
-                              href={row.value}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{ color: 'var(--aifix-primary)', textDecoration: 'underline' }}
+              ) : profile?.has_profile ? (
+                <>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => profile && setBasicForm(profileToBasicForm(profile))}
+                      disabled={basicSaving}
+                      className="px-5 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-medium hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      되돌리기
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveBasic}
+                      disabled={basicSaving}
+                      className="px-5 py-2.5 rounded-xl text-white font-medium disabled:opacity-50"
+                      style={{ background: 'var(--aifix-primary)' }}
+                    >
+                      {basicSaving ? '저장 중…' : '저장'}
+                    </button>
+                  </div>
+                  <div className="overflow-x-auto rounded-xl border border-gray-200">
+                    <table className={PROFILE_TABLE}>
+                      <tbody>
+                        {basicFieldRows.map((row) => (
+                          <tr key={row.key}>
+                            <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
+                              {row.label}
+                              {row.required ? <span className="text-red-500 ml-0.5">*</span> : null}
+                            </td>
+                            <td className={PROFILE_TD}>
+                              <input
+                                type={row.type ?? 'text'}
+                                value={basicForm[row.key]}
+                                onChange={(e) =>
+                                  setBasicForm((prev) => ({ ...prev, [row.key]: e.target.value }))
+                                }
+                                placeholder={row.placeholder}
+                                className="w-full max-w-xl px-3 py-2 rounded-lg border border-gray-200 text-[var(--aifix-navy)] focus:outline-none focus:ring-2 focus:ring-[var(--aifix-primary)]/30 focus:border-[var(--aifix-primary)]"
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                        <tr>
+                          <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
+                            공급자 유형
+                          </td>
+                          <td className={PROFILE_TD}>
+                            <select
+                              aria-label="공급자 유형"
+                              className="w-full max-w-xl px-3 py-2 rounded-lg border border-gray-200 text-[var(--aifix-navy)] bg-white focus:outline-none focus:ring-2 focus:ring-[var(--aifix-primary)]/30 focus:border-[var(--aifix-primary)]"
+                              value={
+                                isKnownSupplierType(basicForm.supplier_type)
+                                  ? basicForm.supplier_type.trim()
+                                  : ''
+                              }
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setBasicForm((prev) => ({
+                                  ...prev,
+                                  supplier_type: v,
+                                  rmi_certified:
+                                    v === SUPPLIER_TYPE_SMELTER
+                                      ? prev.rmi_certified
+                                      : '',
+                                }));
+                              }}
                             >
-                              {row.value}
-                            </a>
-                          ) : (
-                            row.value
-                          )}
+                              <option value="">선택하세요</option>
+                              {SUPPLIER_TYPE_OPTIONS.map((opt) => (
+                                <option
+                                  key={opt.value}
+                                  value={opt.value}
+                                  title={opt.hint}
+                                >
+                                  {opt.title}
+                                </option>
+                              ))}
+                            </select>
+                            <p className="text-xs text-gray-500 mt-2 max-w-xl">
+                              제조사 · 가공사/제련사 · 유통/물류 · 채굴사 중 해당 유형을 선택하세요.
+                            </p>
+                          </td>
+                        </tr>
+                        {showRmiField ? (
+                          <tr>
+                            <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
+                              RMI 인증 여부
+                            </td>
+                            <td className={PROFILE_TD}>
+                              <p className="text-xs text-gray-500 mb-2">
+                                가공사/제련사인 경우에만 입력합니다.
+                              </p>
+                              <input
+                                type="text"
+                                value={basicForm.rmi_certified}
+                                onChange={(e) =>
+                                  setBasicForm((prev) => ({
+                                    ...prev,
+                                    rmi_certified: e.target.value,
+                                  }))
+                                }
+                                placeholder="예: 인증됨 / 미인증 / 진행중"
+                                className="w-full max-w-xl px-3 py-2 rounded-lg border border-gray-200 text-[var(--aifix-navy)] focus:outline-none focus:ring-2 focus:ring-[var(--aifix-primary)]/30 focus:border-[var(--aifix-primary)]"
+                              />
+                            </td>
+                          </tr>
+                        ) : null}
+                        <tr>
+                          <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
+                            {feocRow.label}
+                          </td>
+                          <td className={PROFILE_TD}>
+                            <input
+                              type="text"
+                              value={basicForm.feoc_status}
+                              onChange={(e) =>
+                                setBasicForm((prev) => ({
+                                  ...prev,
+                                  feoc_status: e.target.value,
+                                }))
+                              }
+                              placeholder={feocRow.placeholder}
+                              className="w-full max-w-xl px-3 py-2 rounded-lg border border-gray-200 text-[var(--aifix-navy)] focus:outline-none focus:ring-2 focus:ring-[var(--aifix-primary)]/30 focus:border-[var(--aifix-primary)]"
+                            />
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-gray-200">
+                  <table className={PROFILE_TABLE}>
+                    <tbody>
+                      {basicFieldRows.map((row) => (
+                        <tr key={row.key}>
+                          <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
+                            {row.label}
+                          </td>
+                          <td className={PROFILE_TD}>—</td>
+                        </tr>
+                      ))}
+                      <tr>
+                        <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
+                          공급자 유형
                         </td>
+                        <td className={PROFILE_TD}>—</td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                      <tr>
+                        <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
+                          RMI 인증 여부
+                        </td>
+                        <td className={PROFILE_TD}>—</td>
+                      </tr>
+                      <tr>
+                        <td className={PROFILE_TD_LABEL} style={{ width: '220px' }}>
+                          {feocRow.label}
+                        </td>
+                        <td className={PROFILE_TD}>—</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           )}
@@ -319,7 +599,10 @@ export function CompanyProfile() {
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-4 mb-6">
                 <button
                   type="button"
-                  onClick={() => setShowModal(true)}
+                  onClick={() => {
+                    resetSiteForm();
+                    setShowModal(true);
+                  }}
                   className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90 shrink-0"
                   style={{ background: 'var(--aifix-primary)' }}
                 >
@@ -528,40 +811,6 @@ export function CompanyProfile() {
                   type="tel"
                   value={newSite.phone}
                   onChange={(e) => setNewSite({ ...newSite, phone: e.target.value })}
-                  className="w-full px-4 py-2 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2"
-                  style={{ borderColor: '#E2E8F0', color: 'var(--aifix-navy)' }}
-                  onFocus={(e) => (e.target.style.borderColor = 'var(--aifix-primary)')}
-                  onBlur={(e) => (e.target.style.borderColor = '#E2E8F0')}
-                />
-              </div>
-
-              <div>
-                <label className="block mb-2" style={{ fontWeight: 500, color: 'var(--aifix-gray)' }}>
-                  신재생 에너지 사용 여부
-                </label>
-                <select
-                  value={newSite.renewableEnergy}
-                  onChange={(e) => setNewSite({ ...newSite, renewableEnergy: e.target.value })}
-                  className="w-full px-4 py-2 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2"
-                  style={{ borderColor: '#E2E8F0', color: 'var(--aifix-navy)' }}
-                  onFocus={(e) => (e.target.style.borderColor = 'var(--aifix-primary)')}
-                  onBlur={(e) => (e.target.style.borderColor = '#E2E8F0')}
-                >
-                  <option value="">선택하세요</option>
-                  <option value="사용">사용</option>
-                  <option value="미사용">미사용</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block mb-2" style={{ fontWeight: 500, color: 'var(--aifix-gray)' }}>
-                  환경 인증
-                </label>
-                <input
-                  type="text"
-                  value={newSite.certification}
-                  onChange={(e) => setNewSite({ ...newSite, certification: e.target.value })}
-                  placeholder="예: ISO 14001, ISO 9001"
                   className="w-full px-4 py-2 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2"
                   style={{ borderColor: '#E2E8F0', color: 'var(--aifix-navy)' }}
                   onFocus={(e) => (e.target.style.borderColor = 'var(--aifix-primary)')}

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ShieldCheck } from 'lucide-react';
+import { AlertCircle, ShieldCheck } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Card, CardContent } from '../ui/card';
@@ -10,9 +10,28 @@ import { Checkbox } from '../ui/checkbox';
 import { Input } from '../ui/input';
 import { acceptAgreement, getInvitationPreview } from '@/lib/api/invitation';
 
-const LS_REGISTERED_KEY = 'aifix_mock_registered';
 const LS_INVITE_KEY = 'aifix_mock_invite';
 const LS_AGREEMENT_SIGNED_KEY = 'aifix_mock_third_party_signed';
+
+/** apiFetch 오류 메시지에서 서버 `detail` 문자열 추출 */
+function parseApiDetailMessage(err: unknown): string {
+  if (!(err instanceof Error)) return '초대 정보를 불러오지 못했습니다.';
+  const raw = err.message;
+  const m = raw.match(/API \d+:\s*([\s\S]+)/);
+  if (!m) return raw || '초대 정보를 불러오지 못했습니다.';
+  try {
+    const j = JSON.parse(m[1].trim()) as { detail?: unknown };
+    if (typeof j.detail === 'string') return j.detail;
+    if (Array.isArray(j.detail)) {
+      return j.detail
+        .map((x) => (typeof x === 'object' && x && 'msg' in x ? String((x as { msg: string }).msg) : String(x)))
+        .join(' ');
+    }
+  } catch {
+    /* JSON 아니면 본문 그대로 */
+  }
+  return m[1].trim();
+}
 
 const MAX_WIDTH = 720;
 const CARD_RADIUS = 12;
@@ -57,13 +76,8 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
   const [signerName, setSignerName] = useState('');
 
   const [agreeSubmitting, setAgreeSubmitting] = useState(false);
-  const [approvalPopupOpen, setApprovalPopupOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-
-  const isRegisteredMock = () => {
-    if (typeof window === 'undefined') return false;
-    return localStorage.getItem(LS_REGISTERED_KEY) === 'true';
-  };
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const canSubmit =
     agreeCollection && agreeThirdParty && signerName.trim() === '동의합니다';
@@ -71,10 +85,12 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
   // 페이지 로드 시 이미 동의했는지 확인
   useEffect(() => {
     if (!invite) {
+      setLoadError('초대 링크가 올바르지 않습니다.');
       setIsLoading(false);
       return;
     }
 
+    setLoadError(null);
     getInvitationPreview(invite)
       .then((data) => {
         if (data.contract_agreed_at) {
@@ -86,6 +102,7 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
       })
       .catch((error) => {
         console.error('초대 정보 조회 실패:', error);
+        setLoadError(parseApiDetailMessage(error));
         setIsLoading(false);
       });
   }, [invite, router]);
@@ -108,11 +125,7 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
       localStorage.setItem(LS_INVITE_KEY, invite || '');
       localStorage.setItem(LS_AGREEMENT_SIGNED_KEY, 'true');
 
-      if (isRegisteredMock()) {
-        setApprovalPopupOpen(true);
-      } else {
-        router.push(`/signup/${encodeURIComponent(invite)}/register`);
-      }
+      router.push(`/signup/${encodeURIComponent(invite)}/register`);
     } catch (error) {
       console.error('데이터 계약 동의 실패:', error);
       alert('데이터 계약 동의 처리 중 오류가 발생했습니다.');
@@ -134,6 +147,38 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
           <p className="text-gray-600">초대 정보를 확인하고 있습니다...</p>
         </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen bg-[#EEF3FF] flex items-center justify-center p-6">
+        <Card
+          className="w-full max-w-lg shadow-lg"
+          style={{ borderRadius: CARD_RADIUS, borderColor: BORDER_COLOR }}
+        >
+          <CardContent className="p-8">
+            <div className="flex items-start gap-3 mb-4">
+              <div
+                className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 bg-red-50 text-red-600"
+                aria-hidden
+              >
+                <AlertCircle className="w-6 h-6" />
+              </div>
+              <div>
+                <h1 className="text-lg font-bold text-gray-900">초대 링크를 열 수 없습니다</h1>
+                <p className="text-sm text-gray-600 mt-1" role="alert">
+                  {loadError}
+                </p>
+              </div>
+            </div>
+            <p className="text-xs text-gray-500 leading-relaxed border-t border-gray-100 pt-4">
+              초대 메일을 받은 <strong>처음 연 기기·브라우저</strong>에서 링크를 여는 경우에만 이어서 진행할 수
+              있습니다. 다른 브라우저나 시크릿 창에서는 열리지 않을 수 있습니다.
+            </p>
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -222,12 +267,21 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
           </ul>
         </SectionCard>
 
-        {/* 문의 */}
+        {/* 문의 — 원청 구매팀 (개발 시드 담당과 동일 계열) */}
         <SectionCard title="문의">
-          <p className="text-sm text-gray-700">
-            [원청사] 운영팀 홍길동
+          <p className="text-sm font-semibold text-gray-900">원청사 구매팀</p>
+          <p className="text-sm text-gray-700 mt-2">
+            <span className="text-gray-500">담당</span> 박구매
           </p>
-          <p className="text-sm text-gray-500 mt-1">(이메일 / 연락처)</p>
+          <p className="text-sm text-gray-700 mt-1">
+            <span className="text-gray-500">이메일</span>{" "}
+            <a href="mailto:aifixr0930@gmail.com" className="text-[#5B3BFA] underline underline-offset-2">
+              aifixr0930@gmail.com
+            </a>
+          </p>
+          <p className="text-sm text-gray-700 mt-1">
+            <span className="text-gray-500">연락처</span> 02-3456-7890
+          </p>
         </SectionCard>
 
         {/* Agreement Checkboxes */}
@@ -325,40 +379,6 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
           </Button>
         </div>
       </div>
-
-      {/* Approval Popup */}
-      {approvalPopupOpen && (
-        <div
-          className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
-          onClick={() => setApprovalPopupOpen(false)}
-        >
-          <div
-            className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="text-lg font-bold text-gray-900 mb-2">
-              프로젝트 진입 승인요청이 전송되었습니다
-            </div>
-            <div className="text-sm text-gray-600 leading-relaxed mb-5">
-              기존에 가입된 이력이 확인되어 회원가입 화면으로 이동하지 않습니다.
-              요청 결과는 승인 단계에서 확인하실 수 있어요.
-            </div>
-            <div className="flex justify-end">
-              <Button
-                onClick={handleApprovalConfirm}
-                className="px-6 py-2.5 rounded-xl font-semibold"
-                style={{
-                  background:
-                    'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
-                  color: 'white',
-                }}
-              >
-                확인
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

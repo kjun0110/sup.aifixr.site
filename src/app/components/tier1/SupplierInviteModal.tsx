@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   X,
   Mail,
@@ -23,9 +23,14 @@ import {
   postSupInvitation,
   type InvitationAttachmentContractRevision,
   type InvitationHistoryItem,
+  type SupInvitePayload,
 } from "@/lib/api/invitation";
+import { actorStorageKey, AIFIXR_SESSION_UPDATED_EVENT } from "@/lib/api/client";
 import { approveSignupRequest, rejectSignupRequest } from "@/lib/api/signup-review";
-import { startSupGoogleLinkFlow } from "@/lib/api/supGoogleLink";
+import {
+  SUP_PENDING_INVITE_SEND_STORAGE_KEY,
+  startSupGoogleLinkFlow,
+} from "@/lib/api/supGoogleLink";
 
 const SUPPLIER_INVITE_DEFAULT_BODY = `안녕하세요.
 
@@ -58,21 +63,12 @@ export type SupplierInviteContext = {
 
 function mapApiRowToRecord(r: InvitationHistoryItem): InviteRecord {
   const pendingId = r.pending_signup_request_id;
-  const legacyPending =
-    pendingId == null &&
-    r.status === "in_progress" &&
-    r.last_signup_request_id != null &&
-    r.last_signup_request_id > 0;
   const signupRequestId =
-    pendingId != null && pendingId > 0
-      ? pendingId
-      : legacyPending
-        ? (r.last_signup_request_id as number)
-        : undefined;
+    pendingId != null && pendingId > 0 ? pendingId : undefined;
 
   let status: InviteRecord["status"] = "invited";
   if (signupRequestId != null) {
-    // DB에 승인 대기 신청이 있으면 초대 status가 completed여도 승인/반려 우선
+    // DB에 승인 대기(pending_approval) 신청이 있을 때만 승인/반려 UI
     status = "pending_approval";
   } else if (r.status === "completed") status = "connected";
   else if (r.status === "sent") status = "invited";
@@ -185,6 +181,8 @@ export function SupplierInviteModal({
   const [emailBody, setEmailBody] = useState(SUPPLIER_INVITE_DEFAULT_BODY);
   const [selectedContract, setSelectedContract] = useState("v2.0");
   const [openCompanyDropdownId, setOpenCompanyDropdownId] = useState<string | null>(null);
+  const [sendInvitesLoading, setSendInvitesLoading] = useState(false);
+  const inviteResumeInFlightRef = useRef(false);
 
   const companyCandidates = useMemo(() => {
     const base = ["세진케미칼", "동아소재", "한빛정밀", "그린테크", "코어메탈"];
@@ -220,6 +218,107 @@ export function SupplierInviteModal({
       );
     }
   }, [inviteContext?.projectId, inviteContext?.parentNodeId]);
+
+  /** Gmail 연동 복귀 후 sessionStorage에 남은 협력사 초대 페이로드 자동 발송 */
+  const resumePendingSupInvites = useCallback(async () => {
+    if (inviteResumeInFlightRef.current) return;
+    if (typeof window === "undefined") return;
+    if (!useLiveApi || inviteContext?.parentNodeId == null) return;
+
+    const raw = sessionStorage.getItem(SUP_PENDING_INVITE_SEND_STORAGE_KEY);
+    if (!raw?.trim()) return;
+
+    let payloads: SupInvitePayload[];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        sessionStorage.removeItem(SUP_PENDING_INVITE_SEND_STORAGE_KEY);
+        return;
+      }
+      payloads = parsed as SupInvitePayload[];
+    } catch {
+      sessionStorage.removeItem(SUP_PENDING_INVITE_SEND_STORAGE_KEY);
+      return;
+    }
+
+    if (payloads[0]?.parent_supply_chain_node_id !== inviteContext.parentNodeId) {
+      sessionStorage.removeItem(SUP_PENDING_INVITE_SEND_STORAGE_KEY);
+      return;
+    }
+
+    /* 초대 API는 X-Actor-User-Id 필수 — 원청 Invite와 동일하게 세션 준비 후에만 재발송 */
+    if (!localStorage.getItem(actorStorageKey())?.trim()) return;
+
+    inviteResumeInFlightRef.current = true;
+    setSendInvitesLoading(true);
+    try {
+      let ok = 0;
+      for (let i = 0; i < payloads.length; i++) {
+        try {
+          await postSupInvitation(payloads[i]);
+          ok += 1;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "발송 실패";
+          if (msg.includes("428") || msg.toLowerCase().includes("gmail")) {
+            sessionStorage.setItem(
+              SUP_PENDING_INVITE_SEND_STORAGE_KEY,
+              JSON.stringify(payloads.slice(i)),
+            );
+            toast.message(
+              "초대 메일은 연동된 Google 계정(Gmail)으로 발송됩니다. Google 연동 화면으로 이동합니다.",
+            );
+            try {
+              await startSupGoogleLinkFlow({ reopenInviteModal: true });
+            } catch (e2) {
+              toast.error(
+                e2 instanceof Error ? e2.message : "Google 연동을 시작할 수 없습니다.",
+              );
+            }
+            return;
+          }
+          toast.error(msg);
+        }
+      }
+      sessionStorage.removeItem(SUP_PENDING_INVITE_SEND_STORAGE_KEY);
+      if (ok > 0) {
+        toast.success(`${ok}건 초대 메일을 발송했습니다.`);
+        setRecipients([
+          {
+            id: "r-1",
+            companyName: "",
+            contactName: "",
+            contactEmail: "",
+            childSupplyChainNodeId: null,
+          },
+        ]);
+        await reloadHistory();
+      }
+    } finally {
+      inviteResumeInFlightRef.current = false;
+      setSendInvitesLoading(false);
+    }
+  }, [useLiveApi, inviteContext?.parentNodeId, reloadHistory]);
+
+  useEffect(() => {
+    if (!isOpen || !useLiveApi) return;
+    const t = window.setTimeout(() => {
+      void resumePendingSupInvites();
+    }, 500);
+    const onSession = () => {
+      void resumePendingSupInvites();
+    };
+    window.addEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+    };
+  }, [
+    isOpen,
+    useLiveApi,
+    inviteContext?.projectId,
+    inviteContext?.parentNodeId,
+    resumePendingSupInvites,
+  ]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -358,6 +457,8 @@ export function SupplierInviteModal({
   };
 
   const handleSendInvites = async () => {
+    if (sendInvitesLoading) return;
+
     const filled = recipients
       .map((r) => ({
         ...r,
@@ -389,46 +490,65 @@ export function SupplierInviteModal({
         return;
       }
       const bodyForBackend = emailBody.trim().replace(/https?:\/\/[^\s]+/g, "{link}");
-      let ok = 0;
-      for (const r of filled) {
-        try {
-          await postSupInvitation({
-            parent_supply_chain_node_id: inviteContext.parentNodeId,
-            child_supply_chain_node_id: r.childSupplyChainNodeId ?? undefined,
-            invitee: {
-              company_name: r.companyName,
-              contact_name: r.contactName,
-              email: r.contactEmail,
-            },
-            expire_days: 7,
-            email_subject: emailSubject.trim(),
-            email_body: bodyForBackend,
-          });
-          ok += 1;
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : "발송 실패";
-          if (msg.includes("428") || msg.toLowerCase().includes("gmail")) {
-            toast.message(
-              "초대 메일은 연동된 Google 계정(Gmail)으로 발송됩니다. Google 연동 화면으로 이동합니다.",
-            );
-            try {
-              await startSupGoogleLinkFlow({ reopenInviteModal: true });
-            } catch (e2) {
-              toast.error(
-                e2 instanceof Error ? e2.message : "Google 연동을 시작할 수 없습니다.",
+
+      const payloads: SupInvitePayload[] = filled.map((r) => ({
+        parent_supply_chain_node_id: inviteContext.parentNodeId,
+        child_supply_chain_node_id: r.childSupplyChainNodeId ?? undefined,
+        invitee: {
+          company_name: r.companyName,
+          contact_name: r.contactName,
+          email: r.contactEmail,
+        },
+        expire_days: 7,
+        email_subject: emailSubject.trim(),
+        email_body: bodyForBackend,
+      }));
+
+      setSendInvitesLoading(true);
+      try {
+        let ok = 0;
+        for (let i = 0; i < payloads.length; i++) {
+          try {
+            await postSupInvitation(payloads[i]);
+            ok += 1;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : "발송 실패";
+            if (msg.includes("428") || msg.toLowerCase().includes("gmail")) {
+              sessionStorage.setItem(
+                SUP_PENDING_INVITE_SEND_STORAGE_KEY,
+                JSON.stringify(payloads.slice(i)),
               );
+              toast.message(
+                "초대 메일은 연동된 Google 계정(Gmail)으로 발송됩니다. Google 연동 화면으로 이동합니다.",
+              );
+              try {
+                await startSupGoogleLinkFlow({ reopenInviteModal: true });
+              } catch (e2) {
+                toast.error(
+                  e2 instanceof Error ? e2.message : "Google 연동을 시작할 수 없습니다.",
+                );
+              }
+              return;
             }
-            return;
+            toast.error(msg);
           }
-          toast.error(msg);
         }
-      }
-      if (ok > 0) {
-        toast.success(`${ok}건 초대 메일을 발송했습니다.`);
-        setRecipients([
-          { id: "r-1", companyName: "", contactName: "", contactEmail: "", childSupplyChainNodeId: null },
-        ]);
-        await reloadHistory();
+        if (ok > 0) {
+          sessionStorage.removeItem(SUP_PENDING_INVITE_SEND_STORAGE_KEY);
+          toast.success(`${ok}건 초대 메일을 발송했습니다.`);
+          setRecipients([
+            {
+              id: "r-1",
+              companyName: "",
+              contactName: "",
+              contactEmail: "",
+              childSupplyChainNodeId: null,
+            },
+          ]);
+          await reloadHistory();
+        }
+      } finally {
+        setSendInvitesLoading(false);
       }
       return;
     }
@@ -855,8 +975,10 @@ export function SupplierInviteModal({
             {/* Send Button */}
             <button
               type="button"
-              onClick={handleSendInvites}
-              className="w-full flex items-center justify-center gap-2 py-3 rounded-lg transition-all hover:scale-[1.02]"
+              onClick={() => void handleSendInvites()}
+              disabled={sendInvitesLoading}
+              aria-busy={sendInvitesLoading}
+              className="w-full flex items-center justify-center gap-2 py-3 rounded-lg transition-all hover:scale-[1.02] disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
               style={{
                 background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
                 boxShadow: '0px 4px 12px rgba(91, 59, 250, 0.2)',
@@ -865,7 +987,7 @@ export function SupplierInviteModal({
               }}
             >
               <Send className="w-5 h-5" />
-              초대 메일 발송
+              {sendInvitesLoading ? "발송 중…" : "초대 메일 발송"}
             </button>
           </div>
 
@@ -948,37 +1070,18 @@ export function SupplierInviteModal({
                       </div>
                     )}
 
-                    {(record.status === "contract_signed" || record.status === "registered") && (
+                    {record.status === "contract_signed" && (
                       <div className="flex items-center gap-2 pt-3 border-t" style={{ borderColor: '#E0E0E0' }}>
                         <div className="text-xs flex-1" style={{ color: 'var(--aifix-gray)' }}>
                           프로젝트 진입 승인
                         </div>
-                        <button
-                          onClick={() => void handleApprove(record)}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all hover:scale-105"
-                          style={{
-                            backgroundColor: '#2196F3',
-                            color: 'white',
-                            fontSize: '12px',
-                            fontWeight: 600
-                          }}
+                        <span
+                          className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium"
+                          style={{ backgroundColor: '#FFF8E1', color: '#F57F17' }}
                         >
-                          <Check className="w-3 h-3" />
-                          승인
-                        </button>
-                        <button
-                          onClick={() => void handleReject(record)}
-                          className="flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all hover:scale-105"
-                          style={{
-                            backgroundColor: '#F44336',
-                            color: 'white',
-                            fontSize: '12px',
-                            fontWeight: 600
-                          }}
-                        >
-                          <Ban className="w-3 h-3" />
-                          반려
-                        </button>
+                          <Clock className="w-3 h-3" />
+                          회원가입 대기
+                        </span>
                       </div>
                     )}
                   </div>

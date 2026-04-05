@@ -151,8 +151,24 @@ export function ProjectView() {
         );
       
       case "data-mgmt":
-        // 통합된 데이터 관리 화면 - 모든 차수 공통
-        return <DataManagementNew tier={currentTier} />;
+        // 통합된 데이터 관리 화면 - 모든 차수 공통 (실제 프로젝트는 API로 내 노드 루트 트리)
+        return (
+          <DataManagementNew
+            tier={currentTier}
+            linkedProject={
+              project?.project_id != null &&
+              project?.product_id != null &&
+              project?.supplier_id != null
+                ? {
+                    projectId: project.project_id,
+                    productId: project.product_id,
+                    supplierId: project.supplier_id,
+                    productVariantId: project.product_variant_id ?? null,
+                  }
+                : null
+            }
+          />
+        );
 
       case "ocr-data":
         return <OcrDataInput />;
