@@ -1,9 +1,37 @@
 'use client';
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Info, X } from "lucide-react";
-import { useSites } from "../contexts/SiteContext";
-import type { Site } from "../contexts/SiteContext";
+import { emptySiteForm, useSites, type Site } from "../contexts/SiteContext";
+
+const SUPPLIER_TYPE_SMELTER = "가공사/제련사" as const;
+
+function isSmelterSupplierType(supplierType: string): boolean {
+  return supplierType.trim() === SUPPLIER_TYPE_SMELTER;
+}
+
+function displaySiteCell(value: unknown): string {
+  const t = value == null ? "" : String(value).trim();
+  return t === "" ? "미기입" : t;
+}
+
+/** RMI: 가공사/제련사만 미인증·값, 그 외 해당없음 (회사 프로필·기업 기본정보와 동일) */
+function displayRmiForFacilityTable(supplierType: string, rmiStored: unknown): string {
+  if (isSmelterSupplierType(supplierType)) {
+    const r = rmiStored == null ? "" : String(rmiStored).trim();
+    return r === "" ? "미인증" : r;
+  }
+  return "해당없음";
+}
+
+function deriveCountryFromAddress(address: string): string {
+  const t = address.trim();
+  if (!t) return "";
+  if (/^대한민국\b/.test(t)) return "대한민국";
+  if (/^한국\b/.test(t)) return "대한민국";
+  if (/^(Republic of Korea|South Korea)\b/i.test(t)) return "대한민국";
+  return "";
+}
 
 interface FacilityFormProps {
   supplierId: string;
@@ -14,28 +42,27 @@ interface FacilityFormProps {
 
 export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0 }: FacilityFormProps) {
   const { sites, addSite } = useSites();
-  const [projectSites, setProjectSites] = useState<Site[]>(supplier.facilities || []);
+  const [newSiteSaving, setNewSiteSaving] = useState(false);
+  const [projectSites, setProjectSites] = useState<Site[]>(() =>
+    supplierId === "own" ? [] : supplier.facilities || [],
+  );
+
+  useEffect(() => {
+    if (supplierId === "own") {
+      setProjectSites([]);
+      return;
+    }
+    setProjectSites(Array.isArray(supplier.facilities) ? supplier.facilities : []);
+  }, [supplierId, supplier]);
   const [showMethodModal, setShowMethodModal] = useState(false);
   const [showNewSiteForm, setShowNewSiteForm] = useState(false);
   const [showSelectSiteModal, setShowSelectSiteModal] = useState(false);
   const [selectedSiteIds, setSelectedSiteIds] = useState<string[]>([]);
   const [isSameAsHeadquarter, setIsSameAsHeadquarter] = useState(false);
-  const [newSite, setNewSite] = useState<Site>({
-    id: '',
-    name: '',
-    country: '',
-    address: '',
-    representative: '',
-    email: '',
-    phone: '',
-    renewableEnergy: '',
-    certification: '',
-    rmiSmelter: '',
-    feoc: '',
-  });
+  const [newSite, setNewSite] = useState<Site>(() => emptySiteForm());
 
   const handleAddExistingSite = (site: Site) => {
-    // 이미 추가된 사업장인지 확인(중복은 조용히 스킵)
+    if (supplierId === "own") return;
     setProjectSites((prev) => {
       if (prev.some((s) => s.id === site.id)) return prev;
       return [...prev, site];
@@ -64,65 +91,52 @@ export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0
   };
 
   const handleAddNewSite = () => {
-    if (!newSite.id || !newSite.name) {
-      alert('사업장번호와 사업장명은 필수 입력입니다.');
-      return;
-    }
-    
-    // 전역 Master에 추가
-    addSite(newSite);
-    
-    // 프로젝트 사업장 리스트에도 추가
-    setProjectSites((prev) => [...prev, newSite]);
-    
-    // 폼 초기화
-    setNewSite({
-      id: '',
-      name: '',
-      country: '',
-      address: '',
-      representative: '',
-      email: '',
-      phone: '',
-      renewableEnergy: '',
-      certification: '',
-      rmiSmelter: '',
-      feoc: '',
-    });
-    setShowNewSiteForm(false);
-    setShowMethodModal(false);
+    void (async () => {
+      if (!newSite.name.trim()) {
+        alert('사업장 명은 필수 입력입니다.');
+        return;
+      }
+      if (!newSite.branchWorkplaceNo.trim()) {
+        alert('종사업장번호를 입력해 주세요.');
+        return;
+      }
+      setNewSiteSaving(true);
+      try {
+        const mapped = await addSite(newSite);
+        if (supplierId !== "own") {
+          setProjectSites((prev) => [...prev, mapped]);
+        }
+        setNewSite(emptySiteForm());
+        setShowNewSiteForm(false);
+        setShowMethodModal(false);
+      } catch (e) {
+        alert(e instanceof Error ? e.message : '사업장 등록에 실패했습니다.');
+      } finally {
+        setNewSiteSaving(false);
+      }
+    })();
   };
 
   const handleLoadCompanyInfo = () => {
+    const reg = (supplier.companyInfo?.registrationNumber ?? "").trim();
     setNewSite((prev) => ({
       ...prev,
-      id: supplier.companyInfo.registrationNumber,
-      name: supplier.name,
-      country: supplier.country,
-      address: supplier.location,
-      representative: supplier.companyInfo.representative,
-      email: supplier.companyInfo.email,
-      phone: supplier.companyInfo.phone,
-      rmiSmelter: supplier.companyInfo.rmiSmelter,
-      feoc: supplier.companyInfo.feoc,
+      businessRegNo: reg || prev.businessRegNo,
+      branchWorkplaceNo: reg || prev.branchWorkplaceNo,
+      name: supplier.name ?? prev.name,
+      country: supplier.country ?? prev.country,
+      address: supplier.location ?? prev.address,
+      representative: supplier.companyInfo?.representative ?? prev.representative,
+      email: supplier.companyInfo?.email ?? prev.email,
+      phone: supplier.companyInfo?.phone ?? prev.phone,
+      rmiSmelter: supplier.companyInfo?.rmiSmelter ?? prev.rmiSmelter,
+      feoc: supplier.companyInfo?.feoc ?? prev.feoc,
     }));
   };
 
   const resetSiteForm = () => {
     setIsSameAsHeadquarter(false);
-    setNewSite({
-      id: '',
-      name: '',
-      country: '',
-      address: '',
-      representative: '',
-      email: '',
-      phone: '',
-      renewableEnergy: '',
-      certification: '',
-      rmiSmelter: '',
-      feoc: '',
-    });
+    setNewSite(emptySiteForm());
   };
 
   const handleMethodSelect = (method: 'select' | 'new') => {
@@ -133,14 +147,19 @@ export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0
     }
   };
 
+  /** 「사업장 추가하기」 클릭으로 카운터가 올라갈 때만 모달 오픈 (탭 재진입 시 같은 값으로는 미오픈) */
+  const prevOpenAddRef = useRef(0);
   useEffect(() => {
-    if (supplierId === 'own' && openAddFacilityRequest > 0) {
-      // 사업장 추가하기 버튼 클릭 시, 바로 체크박스 선택 모달을 엽니다.
-      setShowMethodModal(false);
-      setShowNewSiteForm(false);
-      setSelectedSiteIds([]);
-      setShowSelectSiteModal(true);
+    if (supplierId !== "own") return;
+    if (openAddFacilityRequest <= prevOpenAddRef.current) {
+      prevOpenAddRef.current = openAddFacilityRequest;
+      return;
     }
+    prevOpenAddRef.current = openAddFacilityRequest;
+    setSelectedSiteIds([]);
+    setShowMethodModal(false);
+    setShowNewSiteForm(false);
+    setShowSelectSiteModal(true);
   }, [openAddFacilityRequest, supplierId]);
 
   return (
@@ -189,47 +208,150 @@ export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0
             </tr>
           </thead>
           <tbody>
-            {projectSites.map((facility: any, index: number) => (
-              <tr key={index} className="hover:bg-gray-50 transition-colors">
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {facility.name}
-                </td>
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {supplier?.companyInfo?.registrationNumber ?? ''}
-                </td>
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {facility.id}
-                </td>
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {facility.country}
-                </td>
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {facility.address}
-                </td>
-                <td
-                  className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]"
-                  style={{
-                    maxWidth: '14rem',
-                    wordBreak: 'break-word',
-                    overflowWrap: 'anywhere',
-                  }}
+            {supplierId === "own" ? (
+              <>
+                <tr
+                  key="__company-hq__"
+                  className="hover:bg-gray-50 transition-colors bg-slate-50/50"
                 >
-                  {facility.representative}
-                </td>
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {facility.email}
-                </td>
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {facility.phone}
-                </td>
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {facility.rmiSmelter}
-                </td>
-                <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
-                  {facility.feoc}
-                </td>
-              </tr>
-            ))}
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {(() => {
+                      const n = (supplier?.name ?? "").trim();
+                      return n ? `${n}(본사)` : "미기입(본사)";
+                    })()}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {displaySiteCell(supplier?.companyInfo?.registrationNumber)}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    -
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {displaySiteCell(
+                      (supplier?.country ?? "").trim() ||
+                        deriveCountryFromAddress((supplier?.location ?? "").trim()),
+                    )}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {displaySiteCell(supplier?.location)}
+                  </td>
+                  <td
+                    className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]"
+                    style={{
+                      maxWidth: "14rem",
+                      wordBreak: "break-word",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {displaySiteCell(supplier?.companyInfo?.representative)}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {displaySiteCell(supplier?.companyInfo?.email)}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {displaySiteCell(supplier?.companyInfo?.phone)}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {displayRmiForFacilityTable(
+                      supplier?.type ?? "",
+                      supplier?.companyInfo?.rmiSmelter,
+                    )}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {displaySiteCell(supplier?.companyInfo?.feoc)}
+                  </td>
+                </tr>
+                {sites.map((site) => {
+                  const reg = (supplier?.companyInfo?.registrationNumber ?? "").trim();
+                  return (
+                    <tr
+                      key={site.serverId ?? site.id}
+                      className="hover:bg-gray-50 transition-colors"
+                    >
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displaySiteCell(site.name)}
+                      </td>
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displaySiteCell(site.businessRegNo.trim() || reg)}
+                      </td>
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displaySiteCell(site.branchWorkplaceNo)}
+                      </td>
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displaySiteCell(site.country)}
+                      </td>
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displaySiteCell(site.address)}
+                      </td>
+                      <td
+                        className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]"
+                        style={{
+                          maxWidth: "14rem",
+                          wordBreak: "break-word",
+                          overflowWrap: "anywhere",
+                        }}
+                      >
+                        {displaySiteCell(site.representative)}
+                      </td>
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displaySiteCell(site.email)}
+                      </td>
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displaySiteCell(site.phone)}
+                      </td>
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displayRmiForFacilityTable(supplier?.type ?? "", site.rmiSmelter)}
+                      </td>
+                      <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                        {displaySiteCell(site.feoc)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </>
+            ) : (
+              projectSites.map((facility: any, index: number) => (
+                <tr key={index} className="hover:bg-gray-50 transition-colors">
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {facility.name}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {supplier?.companyInfo?.registrationNumber ?? ""}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {facility.id}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {facility.country}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {facility.address}
+                  </td>
+                  <td
+                    className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]"
+                    style={{
+                      maxWidth: "14rem",
+                      wordBreak: "break-word",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {facility.representative}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {facility.email}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {facility.phone}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {facility.rmiSmelter}
+                  </td>
+                  <td className="border border-gray-300 py-4 px-4 align-top text-sm text-[var(--aifix-navy)]">
+                    {facility.feoc}
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
@@ -324,9 +446,14 @@ export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0
             </div>
 
             <div className="space-y-3">
+              {sites.length === 0 ? (
+                <p className="text-sm text-gray-500 py-4">
+                  회사 프로필에 등록된 사업장이 없습니다. 「새 사업장 등록」으로 추가하세요.
+                </p>
+              ) : null}
               {sites.map((site) => (
                 <div
-                  key={site.id}
+                  key={site.serverId ?? site.id}
                   className="p-4 rounded-xl border cursor-pointer transition-all duration-200 hover:border-opacity-100"
                   style={{ borderColor: 'var(--aifix-primary)',  }}
                   onClick={() => toggleSelectedSite(site.id)}
@@ -345,8 +472,10 @@ export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0
 
                     <div className="grid grid-cols-2 gap-4 flex-1">
                       <div>
-                        <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>사업장번호</div>
-                        <div style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>{site.id}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>종사업장번호</div>
+                        <div style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>
+                          {site.branchWorkplaceNo || site.id}
+                        </div>
                       </div>
                       <div>
                         <div style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '4px' }}>사업장 명</div>
@@ -474,19 +603,32 @@ export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0
             </div>
 
             <div className="grid grid-cols-2 gap-6">
-              {/* 사업장번호 */}
               <div>
                 <label className="block mb-2" style={{ fontWeight: 500, color: 'var(--aifix-gray)' }}>
-                  사업장번호 *
+                  종사업장번호 <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
-                  value={newSite.id}
-                  onChange={(e) => setNewSite({ ...newSite, id: e.target.value })}
+                  value={newSite.branchWorkplaceNo}
+                  onChange={(e) => setNewSite({ ...newSite, branchWorkplaceNo: e.target.value })}
                   className="w-full px-4 py-2 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2"
                   style={{ borderColor: '#E2E8F0', color: 'var(--aifix-navy)' }}
-                  onFocus={(e) => e.target.style.borderColor = 'var(--aifix-primary)'}
-                  onBlur={(e) => e.target.style.borderColor = '#E2E8F0'}
+                  onFocus={(e) => (e.target.style.borderColor = 'var(--aifix-primary)')}
+                  onBlur={(e) => (e.target.style.borderColor = '#E2E8F0')}
+                />
+              </div>
+              <div>
+                <label className="block mb-2" style={{ fontWeight: 500, color: 'var(--aifix-gray)' }}>
+                  사업자등록번호 (사업장 단위)
+                </label>
+                <input
+                  type="text"
+                  value={newSite.businessRegNo}
+                  onChange={(e) => setNewSite({ ...newSite, businessRegNo: e.target.value })}
+                  className="w-full px-4 py-2 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2"
+                  style={{ borderColor: '#E2E8F0', color: 'var(--aifix-navy)' }}
+                  onFocus={(e) => (e.target.style.borderColor = 'var(--aifix-primary)')}
+                  onBlur={(e) => (e.target.style.borderColor = '#E2E8F0')}
                 />
               </div>
 
@@ -674,11 +816,13 @@ export function FacilitiesTab({ supplierId, supplier, openAddFacilityRequest = 0
                 취소
               </button>
               <button
+                type="button"
+                disabled={newSiteSaving}
                 onClick={handleAddNewSite}
-                className="px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90"
+                className="px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90 disabled:opacity-50"
                 style={{ background: 'var(--aifix-primary)', fontWeight: 600 }}
               >
-                저장
+                {newSiteSaving ? '저장 중…' : '저장'}
               </button>
             </div>
           </div>

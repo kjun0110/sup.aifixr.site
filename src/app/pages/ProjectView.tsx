@@ -18,7 +18,7 @@ import { NonTier1Transmission } from "../components/non-tier1/NonTier1Transmissi
 import { NonTier1History } from "../components/non-tier1/NonTier1History";
 import { getMyProjectDetail, SupplierProject } from "../../lib/api/supply-chain";
 import { setSupAccessToken } from "../../lib/api/sessionAccessToken";
-import { actorStorageKey } from "../../lib/api/client";
+import { actorStorageKey, restoreSupSessionFromCookie } from "../../lib/api/client";
 import { 
   TrendingUp, 
   AlertCircle, 
@@ -76,20 +76,24 @@ export function ProjectView() {
     if (projectIdParam.startsWith('real-')) {
       const numericId = projectIdParam.replace(/^real-/, '');
       const projectId = parseInt(numericId, 10);
-      
+
       if (isNaN(projectId)) {
         console.error("Invalid project ID:", projectIdParam);
         setLoading(false);
         return;
       }
-      
-      getMyProjectDetail(projectId)
-        .then((data) => {
-          setProject(data);
-        })
-        .catch((error) => {
+
+      let cancelled = false;
+      void (async () => {
+        // 게이트웨이 JWT: 레이아웃의 세션 복구보다 이 effect가 먼저 돌면 Bearer 없이 401 → 선행 복구
+        await restoreSupSessionFromCookie();
+        if (cancelled) return;
+        try {
+          const data = await getMyProjectDetail(projectId);
+          if (!cancelled) setProject(data);
+        } catch (error) {
           console.error("프로젝트 상세 조회 실패:", error);
-          if (error instanceof Error && error.message.includes("401")) {
+          if (!cancelled && error instanceof Error && error.message.includes("401")) {
             setSupAccessToken(null);
             try {
               localStorage.removeItem(actorStorageKey());
@@ -98,10 +102,13 @@ export function ProjectView() {
             }
             router.push("/");
           }
-        })
-        .finally(() => {
-          setLoading(false);
-        });
+        } finally {
+          if (!cancelled) setLoading(false);
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
     } else {
       // 알 수 없는 프로젝트 ID
       console.error("Unknown project ID format:", projectIdParam);

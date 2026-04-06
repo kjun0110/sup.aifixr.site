@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { 
   CheckCircle, 
   AlertCircle, 
@@ -9,22 +9,99 @@ import {
   FileText,
   Users,
   Calculator,
-  Package
+  Package,
+  X,
 } from "lucide-react";
 import { MonthPicker } from "../MonthPicker";
 
+const SUP_PCF_MONTH_RUN_KEY = 'aifix_sup_pcf_month_run_state_v1';
+
+function periodToYm(period: string): string | null {
+  const m = period.match(/(\d{4})\s*년\s*(\d{1,2})\s*월/);
+  if (!m) return null;
+  return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, '0')}`;
+}
+
+function readSupMonthRunState(tier: "tier1", ym: string): { partial?: boolean; final?: boolean } {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(SUP_PCF_MONTH_RUN_KEY);
+    const o = raw ? (JSON.parse(raw) as Record<string, { partial?: boolean; final?: boolean }>) : {};
+    return o[`${tier}|${ym}`] ?? {};
+  } catch {
+    return {};
+  }
+}
+
 export function Tier1Transmission() {
   const [selectedPeriod, setSelectedPeriod] = useState("2026년 1월");
+  const [showTransmitModal, setShowTransmitModal] = useState(false);
+  /** TODO: API 연동 후 "직접요청 수신 여부"로 교체 */
+  const [hasDirectRequest] = useState(false);
+  const [partialPcfCalculated, setPartialPcfCalculated] = useState(false);
+  const [finalPcfCalculated, setFinalPcfCalculated] = useState(false);
+  const [selectedTransmitItems, setSelectedTransmitItems] = useState<Set<"partial" | "final">>(new Set());
 
   // Mock 데이터 준비 상태
   const [ownDataStatus] = useState<"complete" | "incomplete" | "pending">("complete");
   const [supplierDataStatus] = useState<"complete" | "incomplete" | "partial">("complete");
-  const [pcfStatus] = useState<"complete" | "incomplete" | "pending">("complete");
+  const pcfStatus: "complete" | "incomplete" | "pending" = finalPcfCalculated ? "complete" : "pending";
 
   // 전송 가능 여부 판단
   const canTransmit = ownDataStatus === "complete" && 
                        supplierDataStatus === "complete" && 
                        pcfStatus === "complete";
+  const canOpenTransmitModal = ownDataStatus === "complete" && supplierDataStatus === "complete";
+  const canSelectPartial = hasDirectRequest && partialPcfCalculated;
+  const canSelectFinal = finalPcfCalculated;
+
+  useEffect(() => {
+    const ym = periodToYm(selectedPeriod);
+    if (!ym) {
+      setPartialPcfCalculated(false);
+      setFinalPcfCalculated(false);
+      return;
+    }
+    const s = readSupMonthRunState("tier1", ym);
+    setPartialPcfCalculated(Boolean(s.partial || s.final));
+    setFinalPcfCalculated(Boolean(s.final));
+  }, [selectedPeriod]);
+
+  const openTransmitModal = () => {
+    if (!canOpenTransmitModal) return;
+    setSelectedTransmitItems(new Set(hasDirectRequest ? (["partial"] as const) : (["final"] as const)));
+    setShowTransmitModal(true);
+  };
+
+  const toggleTransmitItem = (item: "partial" | "final", checked: boolean) => {
+    setSelectedTransmitItems((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(item);
+      else next.delete(item);
+      return next;
+    });
+  };
+
+  const submitTransmit = () => {
+    if (selectedTransmitItems.has("final") && !canSelectFinal) {
+      toast.error("최종 PCF 산정 완료 후에만 최종산정 결과를 전송할 수 있습니다.");
+      return;
+    }
+    if (selectedTransmitItems.has("partial") && !canSelectPartial) {
+      toast.error("부분 PCF 산정 완료 후에만 부분산정 결과를 전송할 수 있습니다.");
+      return;
+    }
+    if (selectedTransmitItems.size === 0) {
+      toast.error("전송할 항목을 1개 이상 선택해주세요.");
+      return;
+    }
+    const labels = [
+      selectedTransmitItems.has("partial") ? "부분 PCF 산정 결과 및 데이터" : null,
+      selectedTransmitItems.has("final") ? "최종 PCF 산정 결과 및 데이터" : null,
+    ].filter(Boolean);
+    toast.success(`${labels.join(", ")} 전송을 시작합니다. (추후 API 연동)`);
+    setShowTransmitModal(false);
+  };
 
   // 상태별 UI 설정
   const getStatusConfig = (status: string) => {
@@ -271,30 +348,128 @@ export function Tier1Transmission() {
       >
         <div className="text-center">
           <button
-            disabled={!canTransmit}
+            disabled={!canOpenTransmitModal}
+            onClick={openTransmitModal}
             className="px-8 py-4 rounded-xl transition-all flex items-center gap-3 mx-auto"
             style={{
-              background: canTransmit 
+              background: canOpenTransmitModal 
                 ? 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)'
                 : '#E5E7EB',
-              color: canTransmit ? 'white' : '#9CA3AF',
+              color: canOpenTransmitModal ? 'white' : '#9CA3AF',
               fontWeight: 600,
               fontSize: '16px',
-              cursor: canTransmit ? 'pointer' : 'not-allowed',
-              boxShadow: canTransmit ? '0px 4px 12px rgba(91, 59, 250, 0.2)' : 'none'
+              cursor: canOpenTransmitModal ? 'pointer' : 'not-allowed',
+              boxShadow: canOpenTransmitModal ? '0px 4px 12px rgba(91, 59, 250, 0.2)' : 'none'
             }}
           >
             <Send className="w-5 h-5" />
             상위차사에게 데이터 전송
           </button>
           
-          {!canTransmit && (
+          {!canOpenTransmitModal && (
             <p className="mt-4" style={{ fontSize: '14px', color: 'var(--aifix-gray)' }}>
-              모든 데이터 준비가 완료되면 전송이 가능합니다.
+              자사/하위 협력사 데이터 준비 완료 후 전송 항목을 선택할 수 있습니다.
             </p>
           )}
         </div>
       </div>
+
+      {showTransmitModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setShowTransmitModal(false)}
+        >
+          <div
+            className="w-full max-w-xl rounded-2xl bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">상위차사 데이터 전송</h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  전송할 결과 유형을 선택하세요.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                onClick={() => setShowTransmitModal(false)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-3">
+              {hasDirectRequest && (
+                <label className="flex items-start gap-3 rounded-xl border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    disabled={!canSelectPartial}
+                    checked={selectedTransmitItems.has("partial")}
+                    onChange={(e) => toggleTransmitItem("partial", e.target.checked)}
+                  />
+                  <div>
+                    <p className={`text-sm font-semibold ${canSelectPartial ? "text-gray-900" : "text-gray-400"}`}>
+                      PCF 부분산정 결과 및 데이터
+                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      직접요청을 받은 경우 부분산정 결과만으로 상위차사 전송이 가능합니다.
+                    </p>
+                    {!canSelectPartial && (
+                      <p className="text-xs text-amber-600 mt-1">부분 PCF 산정 완료 후 선택 가능합니다.</p>
+                    )}
+                  </div>
+                </label>
+              )}
+
+              <label className="flex items-start gap-3 rounded-xl border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!canSelectFinal}
+                  checked={selectedTransmitItems.has("final")}
+                  onChange={(e) => toggleTransmitItem("final", e.target.checked)}
+                />
+                <div>
+                  <p className={`text-sm font-semibold ${canSelectFinal ? "text-gray-900" : "text-gray-400"}`}>
+                    PCF 최종산정 결과 및 데이터
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    기본 전송 규칙입니다. 최종 산정 완료 후 전송할 수 있습니다.
+                  </p>
+                  {!canSelectFinal && (
+                    <p className="text-xs text-amber-600 mt-1">최종 PCF 산정 완료 후 선택 가능합니다.</p>
+                  )}
+                </div>
+              </label>
+
+              {!hasDirectRequest && (
+                <p className="rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-700">
+                  직접요청 미수신 상태에서는 최종산정 결과 전송만 가능합니다.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-6 py-4">
+              <button
+                type="button"
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
+                onClick={() => setShowTransmitModal(false)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-[#5B3BFA] px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
+                onClick={submitTransmit}
+              >
+                선택 항목 전송
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );

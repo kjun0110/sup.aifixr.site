@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useSearchParams } from "next/navigation";
 import type { ChangeEvent, InputHTMLAttributes, ReactNode } from "react";
@@ -20,11 +20,38 @@ import {
   Upload,
   Send,
   ChevronDown,
+  TableProperties,
 } from "lucide-react";
+import { EprCo2eFactorPickerModal } from "@/app/components/EprCo2eFactorPickerModal";
 import { FacilitiesTab } from "./SupplierDetailFacilitiesTabNew";
 import { toast } from 'sonner';
+import {
+  restoreSupSessionFromCookie,
+  AIFIXR_SESSION_UPDATED_EVENT,
+} from "@/lib/api/client";
+import {
+  getMySupplierProfile,
+  type SupplierProfileMe,
+} from "@/lib/api/supplierProfile";
+import {
+  getMyProjectDetail,
+  type SupplierProject,
+} from "@/lib/api/supply-chain";
+import {
+  countryKoLabelFromCode,
+  getIso3166Alpha2KoOptions,
+} from "@/lib/iso3166Alpha2Ko";
 
 /** 데이터관리에서 쿼리로 진입 시 supplierName은 한글일 수 있음. 이메일 더미는 URL 인코딩하지 않고 라우트 ID 기반으로 둡니다. */
+/** 라우트 `projectId`: 숫자 또는 `real-{id}` → API용 프로젝트 PK */
+function parseSupplierDetailProjectPk(projectId: string | undefined): number | null {
+  if (!projectId) return null;
+  const s = String(projectId).trim();
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  const m = /^real-(\d+)$/i.exec(s);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 function mockCeoEmailFromSupplierId(supplierRouteId: string) {
   const slug =
     supplierRouteId
@@ -42,6 +69,42 @@ function newRowId() {
     : `row-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+/** 에너지 정보 탭 — 에너지 유형 후보 */
+const ENERGY_TYPE_BASE_OPTIONS = [
+  '공업용수',
+  '상수',
+  '경유',
+  '등유',
+  '무연탄',
+  '벙커C유',
+  '석탄',
+  '스팀(열병합발전)',
+  '액화석유가스(LPG)',
+  '전기',
+  '중유',
+  '천연가스',
+  '휘발유',
+] as const;
+
+/** 에너지 정보 탭 — 에너지 사용량 단위 후보 */
+const ENERGY_UNIT_BASE_OPTIONS = ['kg', 'kWh', 'MJ', 'GJ', 'm³'] as const;
+
+/** 생산(납품) 납품 단위 · 자재 투입량 단위 등 공통 후보 (m³=세제곱미터, m²=제곱미터) */
+const DELIVERY_AND_INPUT_UNIT_BASE_OPTIONS = [
+  'kg',
+  'g',
+  'ton',
+  'ton.km',
+  'm³',
+  'm²',
+  'MJ',
+  'kWh',
+  'EA',
+] as const;
+
+/** 운송 물량 — Climatiq 화물 무게(톤)만; 단위 비움은 '선택'으로 두고 수량만 톤으로 해석 */
+const TRANSPORT_CARGO_WEIGHT_UNIT_BASE_OPTIONS = ['kg', 'g', 'ton', 't'] as const;
+
 const EMPTY_PRODUCT_ROW = () => ({
   _rowId: newRowId(),
   materialId: '',
@@ -57,6 +120,7 @@ const EMPTY_PRODUCT_ROW = () => ({
   mineralRatio: '',
   origin: '',
   wasteQuantity: '',
+  wasteQuantityUnit: '',
   wasteEmissionFactor: '',
   wasteEmissionFactorUnit: '',
 });
@@ -93,6 +157,7 @@ const EMPTY_MATERIAL_ROW = () => ({
   materialEmissionFactorUnit: '',
   mineralType: '',
   mineralAmount: '',
+  mineralAmountUnit: '',
   mineralOrigin: '',
   mineralEmissionFactor: '',
   mineralEmissionFactorUnit: '',
@@ -122,31 +187,9 @@ const EMPTY_TRANSPORT_ROW = () => ({
   emissionFactorUnit: '',
 });
 
-/** 검색형 드롭다운용 더미 옵션 (mock) */
-const MOCK_MINERAL_ORIGIN_OPTIONS = [
-  '칠레',
-  '콩고(DRC)',
-  '인도네시아',
-  '호주',
-  '필리핀',
-  '아르헨티나',
-  '페루',
-] as const;
-
-const MOCK_COUNTRY_OPTIONS = [
-  'South Korea',
-  'China',
-  'Japan',
-  'USA',
-  'Germany',
-  'Vietnam',
-  'Indonesia',
-  'Australia',
-] as const;
-
-/** 자재·에너지·운송 탭 제품명 컬럼 안내 (생산제품 탭과 연동) */
+/** 자재·에너지·운송 탭 제품명 컬럼 안내 (계약 품목 + 생산제품 탭 연동) */
 const PRODUCT_NAME_DROPDOWN_HINT =
-  '제품명은 [생산(납품) 제품 정보] 탭에서 제품명을 먼저 입력해야 선택 항목이 표시됩니다.';
+  '제품명 후보는 프로젝트 계약상 직상위(1차) 납품 품목에서 오며, [생산(납품) 제품 정보] 탭에 입력한 제품명도 함께 쓰입니다.';
 
 function ProductNameDropdownNotice() {
   return (
@@ -277,6 +320,163 @@ function SearchableSelectStrict({
   );
 }
 
+/** ISO 3166-1 alpha-2 저장 · 한글명 검색/표시 — 팝업(모달)에서 선택 (환경성적표지 계수 모달과 유사 UX) */
+function SearchableCountrySelect({
+  value,
+  onChange,
+  placeholder = '국가 검색',
+  emptyLabel = '선택',
+}: {
+  value: string;
+  onChange: (alpha2: string) => void;
+  placeholder?: string;
+  emptyLabel?: string;
+}) {
+  const entries = useMemo(() => [...getIso3166Alpha2KoOptions()], []);
+  const normalized = value.trim().toUpperCase();
+  const display = normalized ? countryKoLabelFromCode(normalized) || normalized : '';
+
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = requestAnimationFrame(() => {
+      searchInputRef.current?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false);
+        setQ('');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return entries;
+    return entries.filter(
+      (e) => e.nameKo.toLowerCase().includes(s) || e.code.toLowerCase().includes(s),
+    );
+  }, [entries, q]);
+
+  const close = () => {
+    setOpen(false);
+    setQ('');
+  };
+
+  return (
+    <div className="relative min-w-0 max-w-full">
+      <button
+        type="button"
+        onClick={() => {
+          setQ('');
+          setOpen(true);
+        }}
+        className={SUP_DETAIL_COMBO_TRIGGER}
+      >
+        <span className="min-w-0 flex-1 truncate">{display || emptyLabel}</span>
+        <MapPin className="h-4 w-4 shrink-0 opacity-60" aria-hidden />
+      </button>
+      {open && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+          role="presentation"
+          onClick={close}
+        >
+          <div
+            className="flex max-h-[min(32rem,85vh)] w-full max-w-lg min-h-0 flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="country-picker-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+              <div className="flex min-w-0 items-center gap-2">
+                <MapPin className="h-5 w-5 shrink-0 text-[#5B3BFA]" aria-hidden />
+                <h2 id="country-picker-title" className="truncate text-lg font-bold text-gray-900">
+                  국가 선택
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={close}
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                aria-label="닫기"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="shrink-0 space-y-2 border-b border-gray-100 px-5 py-3">
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder={placeholder}
+                className="box-border w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--aifix-primary)]"
+              />
+              <p className="text-xs text-gray-500">
+                국가명(한글) 또는 ISO 코드로 검색합니다. 선택 시 저장값은 2자 코드(KR, US 등)입니다. ({filtered.length}건
+                표시)
+              </p>
+            </div>
+            <ul className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
+              <li>
+                <button
+                  type="button"
+                  className="w-full rounded-lg px-3 py-2 text-left text-sm text-gray-500 hover:bg-gray-50"
+                  onClick={() => {
+                    onChange('');
+                    close();
+                  }}
+                >
+                  {emptyLabel}
+                </button>
+              </li>
+              {filtered.map((e) => (
+                <li key={e.code}>
+                  <button
+                    type="button"
+                    className="w-full rounded-lg px-3 py-2 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50"
+                    onClick={() => {
+                      onChange(e.code);
+                      close();
+                    }}
+                  >
+                    {e.nameKo}{' '}
+                    <span className="font-mono text-xs text-gray-500">({e.code})</span>
+                  </button>
+                </li>
+              ))}
+              {filtered.length === 0 && (
+                <li className="px-3 py-6 text-center text-sm text-gray-400">검색 결과 없음</li>
+              )}
+            </ul>
+            <div className="flex justify-end border-t border-gray-200 px-5 py-3">
+              <button
+                type="button"
+                onClick={close}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 추가입력 가능: 검색 후 목록 선택 또는 새 값 추가 */
 function SearchableSelectCreatable({
   value,
@@ -284,12 +484,15 @@ function SearchableSelectCreatable({
   baseOptions,
   placeholder = '검색 또는 입력',
   emptyLabel = '선택',
+  allowCreate = true,
 }: {
   value: string;
   onChange: (v: string) => void;
   baseOptions: readonly string[];
   placeholder?: string;
   emptyLabel?: string;
+  /** false면 목록만 선택(운송 물량 단위 등) */
+  allowCreate?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -314,10 +517,15 @@ function SearchableSelectCreatable({
   }, [open]);
 
   const allOptions = useMemo(() => {
+    if (!allowCreate) {
+      const s = new Set<string>([...baseOptions]);
+      if (value.trim()) s.add(value.trim());
+      return Array.from(s);
+    }
     const s = new Set<string>([...baseOptions, ...extra]);
     if (value.trim()) s.add(value.trim());
     return Array.from(s);
-  }, [baseOptions, extra, value]);
+  }, [allowCreate, baseOptions, extra, value]);
 
   const filtered = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -326,6 +534,7 @@ function SearchableSelectCreatable({
   }, [allOptions, q]);
 
   const canAdd =
+    allowCreate &&
     q.trim().length > 0 &&
     !allOptions.some((o) => o.toLowerCase() === q.trim().toLowerCase());
 
@@ -354,7 +563,7 @@ function SearchableSelectCreatable({
             placeholder={placeholder}
             className="box-border w-full border-b border-gray-100 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--aifix-primary)]"
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && canAdd) {
+              if (e.key === 'Enter' && allowCreate && canAdd) {
                 e.preventDefault();
                 const v = q.trim();
                 setExtra((prev) => (prev.includes(v) ? prev : [...prev, v]));
@@ -450,10 +659,11 @@ const SUP_DETAIL_TH =
 const SUP_DETAIL_TD = 'border border-gray-300 py-4 px-4 align-top min-w-0';
 const SUP_DETAIL_TD_LABEL =
   'border border-gray-300 bg-[#F9FAFB] py-4 px-4 align-top text-sm font-medium text-[var(--aifix-gray)]';
+/** 작업 열: 아이콘 2개만 — table-fixed에서도 폭이 과하게 벌어지지 않게 고정 */
 const SUP_DETAIL_TH_ACTION =
-  'border border-gray-300 bg-[#F8F9FA] py-4 px-3 text-right align-middle text-sm font-semibold text-[var(--aifix-navy)] whitespace-nowrap sticky right-0 z-[2] shadow-[-8px_0_16px_-10px_rgba(15,23,42,0.25)]';
+  'box-border border border-gray-300 bg-[#F8F9FA] py-3 px-1 text-center align-middle text-xs font-semibold text-[var(--aifix-navy)] whitespace-nowrap w-[72px] max-w-[72px]';
 const SUP_DETAIL_TD_ACTION =
-  'border border-gray-300 bg-white py-4 px-3 align-top sticky right-0 z-[1] group-hover:bg-gray-50 shadow-[-8px_0_16px_-10px_rgba(15,23,42,0.2)]';
+  'box-border border border-gray-300 bg-white py-2 px-0.5 align-middle min-w-0 w-[72px] max-w-[72px] whitespace-nowrap group-hover:bg-gray-50';
 const SUP_DETAIL_TD_CONTACTS =
   'border border-gray-300 py-4 px-4 align-top text-sm';
 
@@ -661,6 +871,97 @@ const mockSupplierData: Record<string, any> = {
   },
 };
 
+/** 프로필에 스킴만 넣은 홈페이지는 미입력과 동일 */
+function normalizeProfileWebsiteUrl(raw: string | null | undefined): string {
+  const t = (raw ?? "").trim();
+  if (t === "" || t === "https://" || t === "http://") return "";
+  return t;
+}
+
+/**
+ * 본인(own) 상세 — 회사 프로필 API 값만 사용(빈 필드는 mock/쿼리 더미로 채우지 않음).
+ * 제목용 회사명만 API가 비었을 때 URL·mock 베이스 이름을 폴백.
+ */
+function mergeOwnSupplierProfile(
+  base: Record<string, any>,
+  p: SupplierProfileMe,
+): Record<string, any> {
+  const contactsFromApi = (p.contacts ?? [])
+    .map((c) => ({
+      department: (c.department || "").trim() || "—",
+      position: (c.position || "").trim() || "—",
+      name: (c.name || "").trim() || "—",
+      email: (c.email || "").trim() || "—",
+      phone: (c.phone || "").trim() || "—",
+    }))
+    .filter((c) => c.email !== "—" || c.name !== "—" || c.phone !== "—");
+
+  const ci = base.companyInfo ?? {};
+  return {
+    ...base,
+    name: (p.company_name ?? "").trim() || base.name,
+    country: (p.country_location ?? "").trim(),
+    location: (p.address ?? "").trim(),
+    type: (p.supplier_type ?? "").trim(),
+    companyInfo: {
+      ...ci,
+      registrationNumber: (p.business_reg_no ?? "").trim(),
+      dunsNumber: (p.duns_number ?? "").trim(),
+      taxId: (p.tax_id ?? "").trim(),
+      website: normalizeProfileWebsiteUrl(p.website_url),
+      representative: (p.rep_name ?? "").trim(),
+      email: (p.rep_email ?? "").trim(),
+      phone: (p.rep_phone ?? "").trim(),
+      rmiSmelter: (p.rmi_certified ?? "").trim(),
+      feoc: (p.feoc_status ?? "").trim(),
+    },
+    contacts: contactsFromApi,
+    /** 목/mock 사업장 행 제거 — 상세 사업장 탭은 본사(가상)+API 사업장 목록으로만 표시 */
+    facilities: [],
+  };
+}
+
+/**
+ * 회사 프로필 담당자 ↔ 데이터관리 표의 담당자 행이 같은 사람인지 (중복 등록 방지).
+ * 이메일이 있으면 이메일로만 매칭, 둘 다 없으면 이름+연락처.
+ */
+function isSameContactAsEditableRow(
+  row: { emailValue: string; nameRaw: string; phoneValue: string },
+  editable: Record<string, unknown>,
+): boolean {
+  const pe = String(editable.email ?? "").trim().toLowerCase();
+  const pname = String(editable.name ?? "").trim();
+  const pphone = String(editable.phone ?? "").trim();
+  if (row.emailValue && pe === row.emailValue.toLowerCase()) return true;
+  if (!row.emailValue && !pe && pname === row.nameRaw && pphone === row.phoneValue) return true;
+  return false;
+}
+
+/** 회사 프로필 `supplier_type`과 동일한 가공사/제련사 문구 */
+const SUPPLIER_TYPE_SMELTER_LABEL = "가공사/제련사";
+
+function isSmelterSupplierType(supplierType: string): boolean {
+  return supplierType.trim() === SUPPLIER_TYPE_SMELTER_LABEL;
+}
+
+/** 빈 값은 조회 화면에서 "미기입" */
+function displayCompanyField(value: unknown): string {
+  const t = value == null ? "" : String(value).trim();
+  return t === "" ? "미기입" : t;
+}
+
+/**
+ * RMI: 가공사/제련사만 입력 대상. 그 외(제조사·유통 등) → 해당없음.
+ * 제련/가공: 미입력 → 미인증, 입력 시 저장값 그대로(인증·식별 문구 등).
+ */
+function displayRmiCertification(supplierType: string, rmiStored: unknown): string {
+  if (isSmelterSupplierType(supplierType)) {
+    const r = rmiStored == null ? "" : String(rmiStored).trim();
+    return r === "" ? "미인증" : r;
+  }
+  return "해당없음";
+}
+
 export function SupplierDetail() {
   const params = useParams();
   const supplierId = typeof params.supplierId === 'string' ? params.supplierId : params.supplierId?.[0];
@@ -683,12 +984,6 @@ export function SupplierDetail() {
     rmiSmelter: '',
     feoc: '',
   });
-  const [editableData, setEditableData] = useState({
-    rmiSmelter: '',
-    feoc: '',
-    type: '',
-  });
-
   // Excel upload (mock) - 탭별로 업로드 버튼을 눌렀을 때 어떤 탭인지 식별
   const excelFileInputRef = useRef<HTMLInputElement | null>(null);
   const [excelUploadTabId, setExcelUploadTabId] = useState<string | null>(null);
@@ -699,37 +994,29 @@ export function SupplierDetail() {
   const [editableEnergy, setEditableEnergy] = useState<any[]>([]);
   const [editableTransport, setEditableTransport] = useState<any[]>([]);
   const [facilitiesAddRequest, setFacilitiesAddRequest] = useState(0);
+
+  useEffect(() => {
+    if (activeTab !== "facilities") {
+      setFacilitiesAddRequest(0);
+    }
+  }, [activeTab]);
   const [productEditCell, setProductEditCell] = useState<{ rowIndex: number; field: string } | null>(null);
   const [productionEditCell, setProductionEditCell] = useState<{ rowIndex: number; field: string } | null>(null);
   const [materialEditCell, setMaterialEditCell] = useState<{ rowIndex: number; field: string } | null>(null);
   const [energyEditCell, setEnergyEditCell] = useState<{ rowIndex: number; field: string } | null>(null);
   const [transportEditCell, setTransportEditCell] = useState<{ rowIndex: number; field: string } | null>(null);
+  const [eprPickerTarget, setEprPickerTarget] = useState<
+    | { kind: 'productWaste' | 'material' | 'mineral' | 'energy' | 'transport'; rowIndex: number }
+    | null
+  >(null);
   const productEditSnapshotRef = useRef('');
   const productionEditSnapshotRef = useRef('');
   const materialEditSnapshotRef = useRef('');
   const energyEditSnapshotRef = useRef('');
   const transportEditSnapshotRef = useRef('');
 
-  // 회사 프로필에 등록된 담당자(=회원가입한 모든 사용자) 중에서 선택
-  const COMPANY_PROFILE_CONTACTS = [
-    {
-      department: '영업팀',
-      position: '팀장',
-      name: '이영희',
-      email: 'sales@ourcompany.co.kr',
-      phone: '+82-10-1111-2222',
-    },
-    {
-      department: 'ESG팀',
-      position: '담당자',
-      name: '정은지',
-      email: 'esg@ourcompany.co.kr',
-      phone: '+82-10-3333-4444',
-    },
-  ];
-
   const [showContactRegisterModal, setShowContactRegisterModal] = useState(false);
-  const [selectedCompanyContactEmails, setSelectedCompanyContactEmails] = useState<string[]>([]);
+  const [selectedRegisterContactKeys, setSelectedRegisterContactKeys] = useState<string[]>([]);
 
   // 탭 선택 엑셀 다운로드용(세부탭별 체크박스)
   const ALL_DETAIL_TAB_IDS = [
@@ -759,6 +1046,102 @@ export function SupplierDetail() {
   const [revisionRequestTarget, setRevisionRequestTarget] = useState('');
   const [revisionRequestDataType, setRevisionRequestDataType] = useState('');
   const [revisionRequestContent, setRevisionRequestContent] = useState('');
+
+  const [ownProfile, setOwnProfile] = useState<SupplierProfileMe | null>(null);
+  const [ownProfileLoading, setOwnProfileLoading] = useState(false);
+  /** 1차(직상위) 계약 기준 납품 품목명 — 생산(납품) 제품명 콤보 기본 후보 */
+  const [contractDeliverableProductNames, setContractDeliverableProductNames] = useState<string[]>(
+    [],
+  );
+  /** 본인(own) 상단 카드: 직상위차사·계약 품목 등 — `getMyProjectDetail` 응답 */
+  const [ownProjectDetailForCard, setOwnProjectDetailForCard] =
+    useState<SupplierProject | null>(null);
+
+  const loadOwnProfile = useCallback(async () => {
+    setOwnProfileLoading(true);
+    try {
+      await restoreSupSessionFromCookie();
+      const data = await getMySupplierProfile();
+      setOwnProfile(data);
+    } catch {
+      setOwnProfile(null);
+    } finally {
+      setOwnProfileLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (supplierId !== "own") return;
+    void loadOwnProfile();
+  }, [supplierId, loadOwnProfile]);
+
+  useEffect(() => {
+    if (supplierId !== "own" || typeof window === "undefined") return;
+    const onSession = () => {
+      void loadOwnProfile();
+    };
+    window.addEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+    return () => window.removeEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+  }, [supplierId, loadOwnProfile]);
+
+  const projectPkForApi = useMemo(
+    () => parseSupplierDetailProjectPk(projectId),
+    [projectId],
+  );
+
+  const loadContractDeliverableProductNames = useCallback(async () => {
+    if (supplierId !== "own" || projectPkForApi == null) {
+      setContractDeliverableProductNames([]);
+      setOwnProjectDetailForCard(null);
+      return;
+    }
+    try {
+      await restoreSupSessionFromCookie();
+      const detail = await getMyProjectDetail(projectPkForApi);
+      setOwnProjectDetailForCard(detail);
+      const n = (detail.productName ?? "").trim();
+      setContractDeliverableProductNames(n ? [n] : []);
+    } catch {
+      setContractDeliverableProductNames([]);
+      setOwnProjectDetailForCard(null);
+    }
+  }, [supplierId, projectPkForApi]);
+
+  useEffect(() => {
+    void loadContractDeliverableProductNames();
+  }, [loadContractDeliverableProductNames]);
+
+  useEffect(() => {
+    if (supplierId !== "own" || typeof window === "undefined") return;
+    const onSession = () => {
+      void loadContractDeliverableProductNames();
+    };
+    window.addEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+    return () => window.removeEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+  }, [supplierId, loadContractDeliverableProductNames]);
+
+  /** 담당자 등록 모달: 회사 프로필 API `contacts`만 사용 (더미 없음) */
+  const companyContactsForRegisterModal = useMemo(() => {
+    if (supplierId !== "own" || !ownProfile?.has_profile) return [];
+    const list = ownProfile.contacts ?? [];
+    return list.map((c, index) => {
+      const emailValue = (c.email ?? "").trim();
+      const phoneValue = (c.phone ?? "").trim();
+      const nameRaw = (c.name ?? "").trim();
+      const rowKey = emailValue ? emailValue : `no-email:${index}`;
+      return {
+        rowKey,
+        department: (c.department ?? "").trim() || "미기입",
+        position: (c.position ?? "").trim() || "미기입",
+        name: nameRaw || "미기입",
+        nameRaw,
+        emailDisplay: emailValue || "미기입",
+        emailValue,
+        phoneDisplay: phoneValue || "미기입",
+        phoneValue,
+      };
+    });
+  }, [supplierId, ownProfile]);
 
   const supplierFromQuery = (() => {
     const name = searchParams.get('supplierName');
@@ -815,11 +1198,17 @@ export function SupplierDetail() {
     };
   })();
 
-  const supplier = supplierFromQuery
-    ? supplierFromQuery
-    : supplierId
-      ? mockSupplierData[supplierId as keyof typeof mockSupplierData]
-      : mockSupplierData['supplier1'];
+  const supplier = useMemo(() => {
+    const base = supplierFromQuery
+      ? supplierFromQuery
+      : supplierId && mockSupplierData[supplierId as keyof typeof mockSupplierData]
+        ? mockSupplierData[supplierId as keyof typeof mockSupplierData]
+        : mockSupplierData.supplier1;
+    if (supplierId !== "own" || !ownProfile?.has_profile) {
+      return base;
+    }
+    return mergeOwnSupplierProfile(base as Record<string, any>, ownProfile);
+  }, [supplierFromQuery, supplierId, ownProfile]);
 
   const supplierNameKey = searchParams.get('supplierName') ?? '';
   const supplierSyncRef = useRef(supplier);
@@ -871,7 +1260,7 @@ export function SupplierDetail() {
         return rows.length > 0 ? rows : [EMPTY_TRANSPORT_ROW()];
       })(),
     );
-  }, [supplierId, supplierNameKey]);
+  }, [supplierId, supplierNameKey, ownProfile]);
 
   // 권한 정책(협력사 포털):
   // - tier1: 모든 하위차사에게 수정요청 가능
@@ -900,55 +1289,32 @@ export function SupplierDetail() {
 
   const supplierTierNum =
     supplierId === 'own' ? currentTierNum : (targetTierNum ?? null);
+  const parentCompanyFromProject = (ownProjectDetailForCard?.clientName ?? '').trim();
   const directUpperTierLabel = (() => {
     if (supplierTierNum === null) return '-';
     if (supplierId === 'own') {
+      if (parentCompanyFromProject) return parentCompanyFromProject;
       if (projectId === 'p1' && supplierTierNum === 1) return '삼성SDI';
       return supplierTierNum <= 1 ? '-' : `Tier${supplierTierNum - 1}`;
     }
     return supplierTierNum <= 1 ? '원청사' : `Tier${supplierTierNum - 1}`;
   })();
 
-  const pcfPartial = supplier.pcf;
-  const pcfFinal =
-    projectId === 'p1' && supplierId === 'own'
-      ? '-'
-      : supplier.status === '완료' || supplier.status === '검토완료'
+  /** 요약 카드 표기: 미작성 → 미기입 (URL·목 데이터 호환) */
+  const normalizePcfSummaryLabel = (v: unknown): string => {
+    const t = v == null ? "" : String(v).trim();
+    if (t === "" || t === "미작성") return "미기입";
+    return t;
+  };
+
+  const pcfPartial = normalizePcfSummaryLabel(supplier.pcf);
+  const pcfFinal = normalizePcfSummaryLabel(
+    projectId === "p1" && supplierId === "own"
+      ? "-"
+      : supplier.status === "완료" || supplier.status === "검토완료"
         ? supplier.pcf
-        : '-';
-
-  // Initialize editable data when supplier changes
-  // - 본사(own)인 경우 RMI/FEOC는 "선택" 상태로 시작해야 합니다.
-  useEffect(() => {
-    if (!supplier) return;
-
-    const rmiSmelterNext =
-      supplierId === 'own' ? '' : supplier.companyInfo.rmiSmelter;
-    const feocNext =
-      supplierId === 'own' ? '' : supplier.companyInfo.feoc;
-    const typeNext =
-      supplierId === 'own' ? '' : supplier.type;
-
-    // state가 이미 같은 경우에는 업데이트를 스킵해 불필요한 렌더/루프를 방지합니다.
-    if (
-      editableData.rmiSmelter === rmiSmelterNext &&
-      editableData.feoc === feocNext &&
-      editableData.type === typeNext
-    ) {
-      return;
-    }
-
-    setEditableData({
-      rmiSmelter: rmiSmelterNext,
-      feoc: feocNext,
-      type: typeNext,
-    });
-  }, [
-    supplierId,
-    supplier?.type,
-    supplier?.companyInfo?.rmiSmelter,
-    supplier?.companyInfo?.feoc,
-  ]);
+        : "-",
+  );
 
   const handleOpenRevisionRequest = () => {
     setRevisionRequestTarget(supplier?.name ?? '');
@@ -1072,41 +1438,73 @@ export function SupplierDetail() {
   };
 
   const handleOpenContactRegisterModal = () => {
-    setSelectedCompanyContactEmails([]);
+    setSelectedRegisterContactKeys([]);
     setShowContactRegisterModal(true);
   };
 
-  const toggleCompanyContactEmail = (email: string) => {
-    setSelectedCompanyContactEmails((prev) => {
-      if (prev.includes(email)) return prev.filter((x) => x !== email);
-      return [...prev, email];
+  const toggleRegisterContactKey = (key: string) => {
+    setSelectedRegisterContactKeys((prev) => {
+      if (prev.includes(key)) return prev.filter((x) => x !== key);
+      return [...prev, key];
     });
   };
 
   const handleConfirmRegisterSelectedContacts = () => {
-    if (selectedCompanyContactEmails.length === 0) {
+    if (selectedRegisterContactKeys.length === 0) {
       alert('담당자를 1명 이상 선택해주세요.');
       return;
     }
 
-    const selectedContacts = COMPANY_PROFILE_CONTACTS.filter((c) =>
-      selectedCompanyContactEmails.includes(c.email),
+    const selectedRows = companyContactsForRegisterModal.filter(
+      (c) =>
+        selectedRegisterContactKeys.includes(c.rowKey) &&
+        !editableContacts.some((p: any) =>
+          isSameContactAsEditableRow(
+            {
+              emailValue: c.emailValue,
+              nameRaw: c.nameRaw,
+              phoneValue: c.phoneValue,
+            },
+            p,
+          ),
+        ),
     );
 
+    if (selectedRows.length === 0) {
+      alert(
+        "추가할 수 있는 담당자를 선택해 주세요. 이미 담당자 표에 있는 인원은 선택할 수 없습니다.",
+      );
+      return;
+    }
+
     setEditableContacts((prev) => {
-      const existingEmails = new Set((prev ?? []).map((p: any) => String(p.email ?? '')));
       const next = [...(prev ?? [])];
 
-      selectedContacts.forEach((c) => {
-        if (!existingEmails.has(String(c.email))) {
-          next.push(c);
-        }
+      selectedRows.forEach((row) => {
+        const dup = next.some((p: any) =>
+          isSameContactAsEditableRow(
+            {
+              emailValue: row.emailValue,
+              nameRaw: row.nameRaw,
+              phoneValue: row.phoneValue,
+            },
+            p,
+          ),
+        );
+        if (dup) return;
+        next.push({
+          department: row.department,
+          position: row.position,
+          name: row.nameRaw,
+          email: row.emailValue,
+          phone: row.phoneValue,
+        });
       });
 
       return next;
     });
 
-    setSelectedCompanyContactEmails([]);
+    setSelectedRegisterContactKeys([]);
     setShowContactRegisterModal(false);
   };
 
@@ -1115,8 +1513,6 @@ export function SupplierDetail() {
     const addRowLabel = tabId === 'facilities' ? '사업장 추가하기' : '행추가';
     const isContactsTab = tabId === 'contacts';
     const isCompanyInfoTab = tabId === 'company-info';
-    const isCompanyInfoTypeIncomplete =
-      supplierId === 'own' && isCompanyInfoTab && !String(editableData.type ?? '').trim();
     return (
       <div className="flex items-center gap-3 mb-0 flex-wrap">
         {showCompanyInfoNote && (
@@ -1196,17 +1592,6 @@ export function SupplierDetail() {
               <span style={{ fontWeight: 600 }}>수정 완료</span>
             </button>
           )}
-          {isCompanyInfoTab && (
-            <button
-              type="button"
-              onClick={handleSaveComplete}
-              disabled={isCompanyInfoTypeIncomplete}
-              className="flex items-center gap-2 px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ background: 'var(--aifix-primary)' }}
-            >
-              <span style={{ fontWeight: 600 }}>수정 완료</span>
-            </button>
-          )}
         </div>
       </div>
     );
@@ -1251,13 +1636,26 @@ export function SupplierDetail() {
     return rows.length > 0 ? rows : [EMPTY_TRANSPORT_ROW()];
   }, [supplierId, editableTransport, supplier.transport]);
 
-  const productNameOptions: string[] = Array.from(
-    new Set(
-      (displayProducts ?? [])
-        .map((p: any) => String(p?.name ?? ''))
-        .filter((n: string) => n.trim().length > 0),
-    ),
-  );
+  /** 계약 납품 품목을 앞에 두고, 표에 이미 적은 제품명은 뒤에 이어 붙임 */
+  const productNameOptions: string[] = useMemo(() => {
+    const fromContract = contractDeliverableProductNames.filter((n) => n.trim().length > 0);
+    const fromTable: string[] = Array.from(
+      new Set(
+        (displayProducts ?? [])
+          .map((p: { name?: unknown }) => String(p?.name ?? "").trim())
+          .filter((n: string) => n.length > 0),
+      ),
+    );
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const n of [...fromContract, ...fromTable]) {
+      if (!seen.has(n)) {
+        seen.add(n);
+        out.push(n);
+      }
+    }
+    return out;
+  }, [contractDeliverableProductNames, displayProducts]);
 
   const insertProductRowAfter = (index: number) => {
     setEditableProducts((prev) => {
@@ -1336,11 +1734,11 @@ export function SupplierDetail() {
     onInsertBelow: () => void;
     onRemove: () => void;
   }) => (
-    <div className="flex items-center justify-end gap-0.5">
+    <div className="flex items-center justify-center gap-0">
       <button
         type="button"
         onClick={onInsertBelow}
-        className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-violet-50 hover:text-[var(--aifix-primary)] transition-colors"
+        className="inline-flex items-center justify-center rounded-md p-1.5 text-gray-500 hover:bg-violet-50 hover:text-[var(--aifix-primary)] transition-colors"
         title="이 행 아래에 새 행 추가"
         aria-label="이 행 아래에 새 행 추가"
       >
@@ -1349,7 +1747,7 @@ export function SupplierDetail() {
       <button
         type="button"
         onClick={onRemove}
-        className="inline-flex items-center justify-center rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
+        className="inline-flex items-center justify-center rounded-md p-1.5 text-gray-500 hover:bg-red-50 hover:text-red-600 transition-colors"
         title="이 행 삭제"
         aria-label="이 행 삭제"
       >
@@ -1530,10 +1928,30 @@ export function SupplierDetail() {
   };
 
   const renderTabContent = () => {
+    const supplierTypeForRmi = supplier.type;
+    const rmiDisplayText = displayRmiCertification(
+      supplierTypeForRmi,
+      supplier.companyInfo.rmiSmelter,
+    );
+    const websiteUrlRaw = String(supplier.companyInfo.website ?? "").trim();
+
     switch (activeTab) {
       case "company-info":
         return (
           <EditableSupplierTableShell tabId="company-info">
+            {supplierId === "own" && ownProfileLoading ? (
+              <p className="mb-4 text-sm text-gray-500" role="status">
+                회사 정보를 불러오는 중…
+              </p>
+            ) : null}
+            {supplierId === "own" && ownProfile && !ownProfile.has_profile ? (
+              <p
+                className="mb-4 text-sm text-amber-900 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2"
+                role="status"
+              >
+                승인된 회사 프로필이 없습니다. 원청 승인이 완료되면 회사 프로필과 동일한 법인 정보가 여기에 표시됩니다.
+              </p>
+            ) : null}
             <table className={SUP_DETAIL_TABLE}>
               <tbody>
                 <tr>
@@ -1541,13 +1959,9 @@ export function SupplierDetail() {
                     회사명
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.name}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.name}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.name)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
@@ -1555,13 +1969,9 @@ export function SupplierDetail() {
                     사업자등록번호
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.registrationNumber}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.registrationNumber}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.companyInfo.registrationNumber)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
@@ -1569,13 +1979,9 @@ export function SupplierDetail() {
                     국가 소재지
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.country}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.country}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.country)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
@@ -1583,13 +1989,9 @@ export function SupplierDetail() {
                     상세주소
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.location}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.location}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.location)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
@@ -1597,13 +1999,9 @@ export function SupplierDetail() {
                     DUNS Number
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.dunsNumber}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.dunsNumber}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.companyInfo.dunsNumber)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
@@ -1611,13 +2009,9 @@ export function SupplierDetail() {
                     텍스 ID
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.taxId}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.taxId}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.companyInfo.taxId)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
@@ -1625,19 +2019,21 @@ export function SupplierDetail() {
                     공식 홈페이지 주소
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.website}</span>
-                      </div>
+                    {websiteUrlRaw ? (
+                      supplierId === "own" ? (
+                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{websiteUrlRaw}</span>
+                      ) : (
+                        <a
+                          href={websiteUrlRaw}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: 'var(--aifix-primary)', textDecoration: 'underline' }}
+                        >
+                          {websiteUrlRaw}
+                        </a>
+                      )
                     ) : (
-                      <a 
-                        href={supplier.companyInfo.website} 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        style={{ color: 'var(--aifix-primary)', textDecoration: 'underline' }}
-                      >
-                        {supplier.companyInfo.website}
-                      </a>
+                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>미기입</span>
                     )}
                   </td>
                 </tr>
@@ -1646,13 +2042,9 @@ export function SupplierDetail() {
                     대표자명
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.representative}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.representative}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.companyInfo.representative)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
@@ -1660,13 +2052,9 @@ export function SupplierDetail() {
                     대표 이메일
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.email}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.email}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.companyInfo.email)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
@@ -1674,20 +2062,16 @@ export function SupplierDetail() {
                     대표자 연락처
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <div className="flex items-center gap-2">
-                        <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.phone}</span>
-                      </div>
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{supplier.companyInfo.phone}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
+                      {displayCompanyField(supplier.companyInfo.phone)}
+                    </span>
                   </td>
                 </tr>
                 <tr>
                   <td className={SUP_DETAIL_TD_LABEL}>RMI 인증 여부</td>
                   <td className={SUP_DETAIL_TD}>
                     <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
-                      {supplier.companyInfo.rmiSmelter || '-'}
+                      {rmiDisplayText}
                     </span>
                   </td>
                 </tr>
@@ -1695,7 +2079,7 @@ export function SupplierDetail() {
                   <td className={SUP_DETAIL_TD_LABEL}>FEOC 여부</td>
                   <td className={SUP_DETAIL_TD}>
                     <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>
-                      {supplier.companyInfo.feoc || '-'}
+                      {displayCompanyField(supplier.companyInfo.feoc)}
                     </span>
                   </td>
                 </tr>
@@ -1704,23 +2088,9 @@ export function SupplierDetail() {
                     공급자 유형
                   </td>
                   <td className={SUP_DETAIL_TD}>
-                    {supplierId === 'own' ? (
-                      <input
-                        type="text"
-                        value={editableData.type}
-                        className="flex-1 px-4 py-2 rounded-lg border w-full transition-all duration-200 focus:outline-none focus:ring-2"
-                        style={{ 
-                          borderColor: '#E2E8F0', 
-                          color: 'var(--aifix-navy)',
-                          fontWeight: 700,
-                        }}
-                        onFocus={(e) => e.target.style.borderColor = 'var(--aifix-primary)'}
-                        onBlur={(e) => e.target.style.borderColor = '#E2E8F0'}
-                        onChange={(e) => setEditableData({ ...editableData, type: e.target.value })}
-                      />
-                    ) : (
-                      <span style={{ color: 'var(--aifix-navy)', fontWeight: 700 }}>{supplier.type}</span>
-                    )}
+                    <span style={{ color: 'var(--aifix-navy)', fontWeight: 700 }}>
+                      {displayCompanyField(supplier.type)}
+                    </span>
                   </td>
                 </tr>
               </tbody>
@@ -1749,9 +2119,6 @@ export function SupplierDetail() {
                           제품명
                         </th>
                         <th className={SUP_DETAIL_TH}>
-                          광물 원산지
-                        </th>
-                        <th className={SUP_DETAIL_TH}>
                           납품일
                         </th>
                         <th className={SUP_DETAIL_TH}>
@@ -1765,6 +2132,9 @@ export function SupplierDetail() {
                         </th>
                         <th className={SUP_DETAIL_TH}>
                           폐기물량
+                        </th>
+                        <th className={SUP_DETAIL_TH}>
+                          폐기물량 단위
                         </th>
                         <th className={SUP_DETAIL_TH}>
                           폐기물 배출계수
@@ -1801,22 +2171,6 @@ export function SupplierDetail() {
                             )}
                           </td>
                           <td className={SUP_DETAIL_TD}>
-                            {isOwnSupplier && index === 0 ? (
-                              <SearchableSelectStrict
-                                value={String(product.origin ?? '')}
-                                onChange={(v) =>
-                                  setEditableProducts((prev) =>
-                                    prev.map((r, i) => (i === index ? { ...r, origin: v } : r)),
-                                  )
-                                }
-                                options={MOCK_MINERAL_ORIGIN_OPTIONS}
-                                placeholder="광물 원산지 검색"
-                              />
-                            ) : (
-                              renderOwnTextCell('product', index, 'origin', product.origin)
-                            )}
-                          </td>
-                          <td className={SUP_DETAIL_TD}>
                             {renderOwnTextCell('product', index, 'deliveryDate', product.deliveryDate)}
                           </td>
                           <td className={SUP_DETAIL_TD}>
@@ -1831,7 +2185,7 @@ export function SupplierDetail() {
                                     prev.map((r, i) => (i === index ? { ...r, unit: v } : r)),
                                   )
                                 }
-                                baseOptions={['kg', 'ton', 'g', 'EA', '개', 'm³']}
+                                baseOptions={DELIVERY_AND_INPUT_UNIT_BASE_OPTIONS}
                                 placeholder="납품 단위 검색·추가"
                               />
                             ) : (
@@ -1845,14 +2199,53 @@ export function SupplierDetail() {
                             {renderOwnTextCell('product', index, 'wasteQuantity', product.wasteQuantity)}
                           </td>
                           <td className={SUP_DETAIL_TD}>
-                            {renderOwnTextCell('product', index, 'wasteEmissionFactor', product.wasteEmissionFactor)}
+                            {isOwnSupplier ? (
+                              <SearchableSelectCreatable
+                                value={String(product.wasteQuantityUnit ?? '')}
+                                onChange={(v) =>
+                                  setEditableProducts((prev) =>
+                                    prev.map((r, i) =>
+                                      i === index ? { ...r, wasteQuantityUnit: v } : r,
+                                    ),
+                                  )
+                                }
+                                baseOptions={DELIVERY_AND_INPUT_UNIT_BASE_OPTIONS}
+                                placeholder="폐기물량 단위 검색·추가"
+                              />
+                            ) : (
+                              renderOwnTextCell('product', index, 'wasteQuantityUnit', product.wasteQuantityUnit)
+                            )}
+                          </td>
+                          <td className={SUP_DETAIL_TD}>
+                            {isOwnSupplier ? (
+                              <div className="flex min-w-0 items-center gap-1">
+                                <div className="min-w-0 flex-1">
+                                  {renderOwnTextCell(
+                                    'product',
+                                    index,
+                                    'wasteEmissionFactor',
+                                    product.wasteEmissionFactor,
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  title="환경성적표지 참조 계수에서 선택"
+                                  className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                                  onClick={() => setEprPickerTarget({ kind: 'productWaste', rowIndex: index })}
+                                >
+                                  <TableProperties className="h-4 w-4" />
+                                </button>
+                              </div>
+                            ) : (
+                              renderOwnTextCell('product', index, 'wasteEmissionFactor', product.wasteEmissionFactor)
+                            )}
                           </td>
                           <td className={SUP_DETAIL_TD}>
                             {renderOwnTextCell('product', index, 'wasteEmissionFactorUnit', product.wasteEmissionFactorUnit)}
                           </td>
                           {isOwnSupplier && (
                             <td className={SUP_DETAIL_TD_ACTION}>
-                              <div className="flex h-8 items-center justify-end">
+                              <div className="flex min-h-8 items-center justify-center">
                                 <EditableRowActions
                                   onInsertBelow={() => insertProductRowAfter(index)}
                                   onRemove={() => removeProductRowAt(index)}
@@ -1886,6 +2279,7 @@ export function SupplierDetail() {
                   <th className={SUP_DETAIL_TH}>자재 배출계수 단위</th>
                   <th className={SUP_DETAIL_TH}>투입 광물 종류</th>
                   <th className={SUP_DETAIL_TH}>투입 광물량</th>
+                  <th className={SUP_DETAIL_TH}>투입 광물량 단위</th>
                   <th className={SUP_DETAIL_TH}>광물 원산지</th>
                   <th className={SUP_DETAIL_TH}>광물 배출계수</th>
                   <th className={SUP_DETAIL_TH}>광물 배출계수 단위</th>
@@ -1927,10 +2321,44 @@ export function SupplierDetail() {
                       {renderOwnTextCell('material', index, 'inputAmount', row.inputAmount)}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {renderOwnTextCell('material', index, 'inputAmountUnit', row.inputAmountUnit)}
+                      {isOwnSupplier ? (
+                        <SearchableSelectCreatable
+                          value={String(row.inputAmountUnit ?? '')}
+                          onChange={(v) =>
+                            setEditableMaterials((prev) =>
+                              prev.map((r, i) => (i === index ? { ...r, inputAmountUnit: v } : r)),
+                            )
+                          }
+                          baseOptions={DELIVERY_AND_INPUT_UNIT_BASE_OPTIONS}
+                          placeholder="투입량 단위 검색·추가"
+                        />
+                      ) : (
+                        renderOwnTextCell('material', index, 'inputAmountUnit', row.inputAmountUnit)
+                      )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {renderOwnTextCell('material', index, 'materialEmissionFactor', row.materialEmissionFactor)}
+                      {isOwnSupplier ? (
+                        <div className="flex min-w-0 items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            {renderOwnTextCell(
+                              'material',
+                              index,
+                              'materialEmissionFactor',
+                              row.materialEmissionFactor,
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            title="환경성적표지 참조 계수에서 선택"
+                            className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                            onClick={() => setEprPickerTarget({ kind: 'material', rowIndex: index })}
+                          >
+                            <TableProperties className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ) : (
+                        renderOwnTextCell('material', index, 'materialEmissionFactor', row.materialEmissionFactor)
+                      )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
                       {renderOwnTextCell('material', index, 'materialEmissionFactorUnit', row.materialEmissionFactorUnit)}
@@ -1955,15 +2383,32 @@ export function SupplierDetail() {
                       {renderOwnTextCell('material', index, 'mineralAmount', row.mineralAmount)}
                     </td>
                     <td className={SUP_DETAIL_TD}>
+                      {isOwnSupplier ? (
+                        <SearchableSelectCreatable
+                          value={String(row.mineralAmountUnit ?? '')}
+                          onChange={(v) =>
+                            setEditableMaterials((prev) =>
+                              prev.map((r, i) =>
+                                i === index ? { ...r, mineralAmountUnit: v } : r,
+                              ),
+                            )
+                          }
+                          baseOptions={DELIVERY_AND_INPUT_UNIT_BASE_OPTIONS}
+                          placeholder="투입 광물량 단위 검색·추가"
+                        />
+                      ) : (
+                        renderOwnTextCell('material', index, 'mineralAmountUnit', row.mineralAmountUnit)
+                      )}
+                    </td>
+                    <td className={SUP_DETAIL_TD}>
                       {isOwnSupplier && index === 0 ? (
-                        <SearchableSelectStrict
+                        <SearchableCountrySelect
                           value={String(row.mineralOrigin ?? '')}
                           onChange={(v) =>
                             setEditableMaterials((prev) =>
                               prev.map((r, i) => (i === index ? { ...r, mineralOrigin: v } : r)),
                             )
                           }
-                          options={MOCK_MINERAL_ORIGIN_OPTIONS}
                           placeholder="광물 원산지 검색"
                         />
                       ) : (
@@ -1971,14 +2416,35 @@ export function SupplierDetail() {
                       )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {renderOwnTextCell('material', index, 'mineralEmissionFactor', row.mineralEmissionFactor)}
+                      {isOwnSupplier ? (
+                        <div className="flex min-w-0 items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            {renderOwnTextCell(
+                              'material',
+                              index,
+                              'mineralEmissionFactor',
+                              row.mineralEmissionFactor,
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            title="환경성적표지 참조 계수에서 선택"
+                            className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                            onClick={() => setEprPickerTarget({ kind: 'mineral', rowIndex: index })}
+                          >
+                            <TableProperties className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ) : (
+                        renderOwnTextCell('material', index, 'mineralEmissionFactor', row.mineralEmissionFactor)
+                      )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
                       {renderOwnTextCell('material', index, 'mineralEmissionFactorUnit', row.mineralEmissionFactorUnit)}
                     </td>
                     {isOwnSupplier && (
                       <td className={SUP_DETAIL_TD_ACTION}>
-                        <div className="flex h-8 items-center justify-end">
+                        <div className="flex min-h-8 items-center justify-center">
                           <EditableRowActions
                             onInsertBelow={() => insertMaterialRowAfter(index)}
                             onRemove={() => removeMaterialRowAt(index)}
@@ -2050,7 +2516,7 @@ export function SupplierDetail() {
                               prev.map((r, i) => (i === index ? { ...r, energyType: v } : r)),
                             )
                           }
-                          baseOptions={['전기', '가스', '스팀']}
+                          baseOptions={ENERGY_TYPE_BASE_OPTIONS}
                           placeholder="에너지 유형 검색·추가"
                         />
                       ) : isOwnSupplier ? (
@@ -2065,9 +2531,11 @@ export function SupplierDetail() {
                           className={SUP_DETAIL_NATIVE_SELECT}
                         >
                           <option value="">선택</option>
-                          <option value="전기">전기</option>
-                          <option value="가스">가스</option>
-                          <option value="스팀">스팀</option>
+                          {ENERGY_TYPE_BASE_OPTIONS.map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt}
+                            </option>
+                          ))}
                         </select>
                       ) : (
                         <span style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
@@ -2087,7 +2555,7 @@ export function SupplierDetail() {
                               prev.map((r, i) => (i === index ? { ...r, energyUnit: v } : r)),
                             )
                           }
-                          baseOptions={['kWh', 'MJ', 'GJ', 'm³']}
+                          baseOptions={ENERGY_UNIT_BASE_OPTIONS}
                           placeholder="에너지 단위 검색·추가"
                         />
                       ) : (
@@ -2095,14 +2563,30 @@ export function SupplierDetail() {
                       )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {renderOwnTextCell('energy', index, 'emissionFactor', row.emissionFactor)}
+                      {isOwnSupplier ? (
+                        <div className="flex min-w-0 items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            {renderOwnTextCell('energy', index, 'emissionFactor', row.emissionFactor)}
+                          </div>
+                          <button
+                            type="button"
+                            title="환경성적표지 참조 계수에서 선택"
+                            className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                            onClick={() => setEprPickerTarget({ kind: 'energy', rowIndex: index })}
+                          >
+                            <TableProperties className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ) : (
+                        renderOwnTextCell('energy', index, 'emissionFactor', row.emissionFactor)
+                      )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
                       {renderOwnTextCell('energy', index, 'emissionFactorUnit', row.emissionFactorUnit)}
                     </td>
                     {isOwnSupplier && (
                       <td className={SUP_DETAIL_TD_ACTION}>
-                        <div className="flex h-8 items-center justify-end">
+                        <div className="flex min-h-8 items-center justify-center">
                           <EditableRowActions
                             onInsertBelow={() => insertEnergyRowAfter(index)}
                             onRemove={() => removeEnergyRowAt(index)}
@@ -2170,38 +2654,48 @@ export function SupplierDetail() {
                       )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {isOwnSupplier && index === 0 ? (
-                        <SearchableSelectStrict
+                      {isOwnSupplier ? (
+                        <SearchableCountrySelect
                           value={String(row.originCountry ?? '')}
                           onChange={(v) =>
                             setEditableTransport((prev) =>
-                              prev.map((r, i) => (i === index ? { ...r, originCountry: v } : r)),
+                              prev.map((r, i) =>
+                                i === index ? { ...r, originCountry: v.toUpperCase().slice(0, 2) } : r,
+                              ),
                             )
                           }
-                          options={MOCK_COUNTRY_OPTIONS}
-                          placeholder="출발지 국가 검색"
+                          placeholder="국가명·코드 검색 (출발지)"
+                          emptyLabel="선택"
                         />
                       ) : (
-                        renderOwnTextCell('transport', index, 'originCountry', row.originCountry)
+                        <span style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
+                          {countryKoLabelFromCode(row.originCountry) || '\u00a0'}
+                        </span>
                       )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
                       {renderOwnTextCell('transport', index, 'originAddress', row.originAddress)}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {isOwnSupplier && index === 0 ? (
-                        <SearchableSelectStrict
+                      {isOwnSupplier ? (
+                        <SearchableCountrySelect
                           value={String(row.destinationCountry ?? '')}
                           onChange={(v) =>
                             setEditableTransport((prev) =>
-                              prev.map((r, i) => (i === index ? { ...r, destinationCountry: v } : r)),
+                              prev.map((r, i) =>
+                                i === index
+                                  ? { ...r, destinationCountry: v.toUpperCase().slice(0, 2) }
+                                  : r,
+                              ),
                             )
                           }
-                          options={MOCK_COUNTRY_OPTIONS}
-                          placeholder="도착지 국가 검색"
+                          placeholder="국가명·코드 검색 (도착지)"
+                          emptyLabel="선택"
                         />
                       ) : (
-                        renderOwnTextCell('transport', index, 'destinationCountry', row.destinationCountry)
+                        <span style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
+                          {countryKoLabelFromCode(row.destinationCountry) || '\u00a0'}
+                        </span>
                       )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
@@ -2253,22 +2747,39 @@ export function SupplierDetail() {
                               prev.map((r, i) => (i === index ? { ...r, transportAmountUnit: v } : r)),
                             )
                           }
-                          baseOptions={['kg', 'ton', 'TEU', 'CBM']}
-                          placeholder="물량 단위 검색·추가"
+                          baseOptions={[...TRANSPORT_CARGO_WEIGHT_UNIT_BASE_OPTIONS]}
+                          allowCreate={false}
+                          placeholder="물량 단위 선택"
                         />
                       ) : (
                         renderOwnTextCell('transport', index, 'transportAmountUnit', row.transportAmountUnit)
                       )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {renderOwnTextCell('transport', index, 'emissionFactor', row.emissionFactor)}
+                      {isOwnSupplier ? (
+                        <div className="flex min-w-0 items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            {renderOwnTextCell('transport', index, 'emissionFactor', row.emissionFactor)}
+                          </div>
+                          <button
+                            type="button"
+                            title="환경성적표지 참조 계수에서 선택"
+                            className="shrink-0 rounded-md p-1 text-[#5B3BFA] hover:bg-violet-50"
+                            onClick={() => setEprPickerTarget({ kind: 'transport', rowIndex: index })}
+                          >
+                            <TableProperties className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ) : (
+                        renderOwnTextCell('transport', index, 'emissionFactor', row.emissionFactor)
+                      )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
                       {renderOwnTextCell('transport', index, 'emissionFactorUnit', row.emissionFactorUnit)}
                     </td>
                     {isOwnSupplier && (
                       <td className={SUP_DETAIL_TD_ACTION}>
-                        <div className="flex h-8 items-center justify-end">
+                        <div className="flex min-h-8 items-center justify-center">
                           <EditableRowActions
                             onInsertBelow={() => insertTransportRowAfter(index)}
                             onRemove={() => removeTransportRowAt(index)}
@@ -2298,16 +2809,13 @@ export function SupplierDetail() {
               </thead>
               <tbody>
                 {displayContacts.map((contact: any, index: number) => (
-                  <tr
-                    key={index}
-                    className="hover:bg-gray-50 transition-colors"
-                    style={supplierId === 'own' ? { backgroundColor: '#F8FAFC' } : {}}
-                  >
+                  <tr key={index} className="hover:bg-gray-50 transition-colors">
                     <td
                       className={SUP_DETAIL_TD_CONTACTS}
                       style={{
-                        color: supplierId === 'own' ? '#94A3B8' : 'var(--aifix-navy)',
-                        fontSize: '14px',
+                        color: "var(--aifix-navy)",
+                        fontSize: "14px",
+                        fontWeight: 500,
                       }}
                     >
                       {contact.department}
@@ -2315,8 +2823,9 @@ export function SupplierDetail() {
                     <td
                       className={SUP_DETAIL_TD_CONTACTS}
                       style={{
-                        color: supplierId === 'own' ? '#94A3B8' : 'var(--aifix-navy)',
-                        fontSize: '14px',
+                        color: "var(--aifix-navy)",
+                        fontSize: "14px",
+                        fontWeight: 500,
                       }}
                     >
                       {contact.position}
@@ -2324,8 +2833,9 @@ export function SupplierDetail() {
                     <td
                       className={SUP_DETAIL_TD_CONTACTS}
                       style={{
-                        color: supplierId === 'own' ? '#94A3B8' : 'var(--aifix-navy)',
-                        fontSize: '14px',
+                        color: "var(--aifix-navy)",
+                        fontSize: "14px",
+                        fontWeight: 500,
                       }}
                     >
                       {contact.name}
@@ -2333,8 +2843,9 @@ export function SupplierDetail() {
                     <td
                       className={SUP_DETAIL_TD_CONTACTS}
                       style={{
-                        color: supplierId === 'own' ? '#94A3B8' : 'var(--aifix-navy)',
-                        fontSize: '14px',
+                        color: "var(--aifix-navy)",
+                        fontSize: "14px",
+                        fontWeight: 500,
                       }}
                     >
                       {contact.email}
@@ -2342,8 +2853,9 @@ export function SupplierDetail() {
                     <td
                       className={SUP_DETAIL_TD_CONTACTS}
                       style={{
-                        color: supplierId === 'own' ? '#94A3B8' : 'var(--aifix-navy)',
-                        fontSize: '14px',
+                        color: "var(--aifix-navy)",
+                        fontSize: "14px",
+                        fontWeight: 500,
                       }}
                     >
                       {contact.phone}
@@ -2623,7 +3135,7 @@ export function SupplierDetail() {
             className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4"
             onClick={() => {
               setShowContactRegisterModal(false);
-              setSelectedCompanyContactEmails([]);
+              setSelectedRegisterContactKeys([]);
             }}
           >
             <div
@@ -2638,7 +3150,7 @@ export function SupplierDetail() {
                   type="button"
                   onClick={() => {
                     setShowContactRegisterModal(false);
-                    setSelectedCompanyContactEmails([]);
+                    setSelectedRegisterContactKeys([]);
                   }}
                   className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
                   aria-label="닫기"
@@ -2648,64 +3160,115 @@ export function SupplierDetail() {
               </div>
 
               <div className="p-6">
-                <div className="mb-4 text-sm" style={{ color: 'var(--aifix-gray)' }}>
-                  회사 프로필에 등록된 전체 직원 중에서 1명 이상을 선택합니다.
+                <div className="mb-4 text-sm space-y-1" style={{ color: 'var(--aifix-gray)' }}>
+                  <p>회사 프로필에 등록된 전체 직원 중에서 1명 이상을 선택합니다.</p>
+                  <p className="text-xs sm:text-sm">
+                    이미 아래 「담당자 정보」표에 올라간 인원은 중복 방지를 위해 선택할 수 없습니다.
+                  </p>
                 </div>
 
                 <div className="max-h-[55vh] overflow-y-auto border border-gray-200 rounded-xl">
-                  <table className="w-full border-collapse">
-                    <thead>
-                      <tr>
-                        <th className="w-[72px] py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                          선택
-                        </th>
-                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                          부서명
-                        </th>
-                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                          직급
-                        </th>
-                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                          이름
-                        </th>
-                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                          이메일
-                        </th>
-                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                          연락처
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {COMPANY_PROFILE_CONTACTS.map((c) => (
-                        <tr key={c.email} className="border-t border-gray-100 hover:bg-gray-50 transition-colors">
-                          <td className="py-3 px-4">
-                            <input
-                              type="checkbox"
-                              checked={selectedCompanyContactEmails.includes(c.email)}
-                              onChange={() => toggleCompanyContactEmail(c.email)}
-                              style={{ accentColor: 'var(--aifix-primary)' }}
-                            />
-                          </td>
-                          <td className="py-3 px-4 text-sm" style={{ color: 'var(--aifix-navy)' }}>
-                            {c.department}
-                          </td>
-                          <td className="py-3 px-4 text-sm" style={{ color: 'var(--aifix-navy)' }}>
-                            {c.position}
-                          </td>
-                          <td className="py-3 px-4 text-sm" style={{ color: 'var(--aifix-navy)' }}>
-                            {c.name}
-                          </td>
-                          <td className="py-3 px-4 text-sm" style={{ color: 'var(--aifix-navy)' }}>
-                            {c.email}
-                          </td>
-                          <td className="py-3 px-4 text-sm" style={{ color: 'var(--aifix-navy)' }}>
-                            {c.phone}
-                          </td>
+                  {ownProfileLoading ? (
+                    <div className="px-4 py-8 text-sm text-gray-500">담당자 목록을 불러오는 중…</div>
+                  ) : !ownProfile?.has_profile ? (
+                    <div className="px-4 py-8 text-sm text-gray-500">
+                      승인된 회사 프로필이 있으면 회사에 등록된 담당자가 여기 표시됩니다.
+                    </div>
+                  ) : companyContactsForRegisterModal.length === 0 ? (
+                    <div className="px-4 py-8 text-sm text-gray-500">
+                      회사 프로필에 등록된 담당자가 없습니다. 회사 프로필의 담당자 정보를 먼저
+                      확인해 주세요.
+                    </div>
+                  ) : (
+                    <table className="w-full border-collapse">
+                      <thead>
+                        <tr>
+                          <th className="w-[72px] py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                            선택
+                          </th>
+                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                            부서명
+                          </th>
+                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                            직급
+                          </th>
+                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                            이름
+                          </th>
+                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                            이메일
+                          </th>
+                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                            연락처
+                          </th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {companyContactsForRegisterModal.map((c) => {
+                          const alreadyOnSheet = editableContacts.some((p: any) =>
+                            isSameContactAsEditableRow(
+                              {
+                                emailValue: c.emailValue,
+                                nameRaw: c.nameRaw,
+                                phoneValue: c.phoneValue,
+                              },
+                              p,
+                            ),
+                          );
+                          return (
+                            <tr
+                              key={c.rowKey}
+                              className={`border-t border-gray-100 transition-colors ${
+                                alreadyOnSheet ? "bg-slate-50/90" : "hover:bg-gray-50"
+                              }`}
+                            >
+                              <td className="py-3 px-4">
+                                <input
+                                  type="checkbox"
+                                  disabled={alreadyOnSheet}
+                                  checked={
+                                    !alreadyOnSheet && selectedRegisterContactKeys.includes(c.rowKey)
+                                  }
+                                  onChange={() => {
+                                    if (!alreadyOnSheet) toggleRegisterContactKey(c.rowKey);
+                                  }}
+                                  title={
+                                    alreadyOnSheet
+                                      ? "이미 담당자 정보 표에 등록된 인원입니다."
+                                      : undefined
+                                  }
+                                  style={{ accentColor: "var(--aifix-primary)" }}
+                                />
+                              </td>
+                              <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
+                                {c.department}
+                              </td>
+                              <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
+                                {c.position}
+                              </td>
+                              <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
+                                {c.name}
+                                {alreadyOnSheet ? (
+                                  <span
+                                    className="ml-2 text-xs font-medium text-gray-400"
+                                    title="이미 등록됨"
+                                  >
+                                    (등록됨)
+                                  </span>
+                                ) : null}
+                              </td>
+                              <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
+                                {c.emailDisplay}
+                              </td>
+                              <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
+                                {c.phoneDisplay}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </div>
 
@@ -2714,7 +3277,7 @@ export function SupplierDetail() {
                   type="button"
                   onClick={() => {
                     setShowContactRegisterModal(false);
-                    setSelectedCompanyContactEmails([]);
+                    setSelectedRegisterContactKeys([]);
                   }}
                   className="px-6 py-3 rounded-xl border transition-all duration-200 hover:bg-gray-50"
                   style={{ borderColor: 'var(--aifix-gray)', color: 'var(--aifix-navy)', fontWeight: 600 }}
@@ -2823,6 +3386,57 @@ export function SupplierDetail() {
           </div>
         </div>
       )}
+
+      <EprCo2eFactorPickerModal
+        open={eprPickerTarget !== null}
+        onClose={() => setEprPickerTarget(null)}
+        onApply={({ co2eFactor, factorUnit, label }) => {
+          const t = eprPickerTarget;
+          if (!t) return;
+          const f = String(co2eFactor);
+          if (t.kind === 'productWaste') {
+            setEditableProducts((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex ? { ...r, wasteEmissionFactor: f, wasteEmissionFactorUnit: factorUnit } : r,
+              ),
+            );
+          } else if (t.kind === 'material') {
+            setEditableMaterials((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex
+                  ? { ...r, materialEmissionFactor: f, materialEmissionFactorUnit: factorUnit }
+                  : r,
+              ),
+            );
+          } else if (t.kind === 'mineral') {
+            setEditableMaterials((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex
+                  ? { ...r, mineralEmissionFactor: f, mineralEmissionFactorUnit: factorUnit }
+                  : r,
+              ),
+            );
+          } else if (t.kind === 'energy') {
+            setEditableEnergy((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex ? { ...r, emissionFactor: f, emissionFactorUnit: factorUnit } : r,
+              ),
+            );
+          } else {
+            setEditableTransport((prev) =>
+              prev.map((r, i) =>
+                i === t.rowIndex ? { ...r, emissionFactor: f, emissionFactorUnit: factorUnit } : r,
+              ),
+            );
+          }
+          setProductEditCell(null);
+          setProductionEditCell(null);
+          setMaterialEditCell(null);
+          setEnergyEditCell(null);
+          setTransportEditCell(null);
+          toast.success(`배출계수 반영: ${label}`);
+        }}
+      />
     </div>
   );
 }

@@ -1198,24 +1198,6 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
 
           <button
             type="button"
-            onClick={handleTransmit}
-            disabled={!canTransmit}
-            className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all"
-            style={{
-              backgroundColor: canTransmit ? '#1565C0' : '#E0E0E0',
-              color: canTransmit ? 'white' : '#9E9E9E',
-              fontWeight: 600,
-              cursor: canTransmit ? 'pointer' : 'not-allowed',
-              border: 'none',
-              opacity: canTransmit ? 1 : 0.6
-            }}
-          >
-            <Send className="w-5 h-5" />
-            PCF 결과 전송
-          </button>
-
-          <button
-            type="button"
             className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all"
             style={{
               backgroundColor: 'white',

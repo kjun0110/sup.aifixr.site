@@ -4,7 +4,9 @@ import { useMemo, useState, useEffect, useRef } from "react";
 import { useParams, useRouter, useSearchParams, usePathname } from "next/navigation";
 import { toast } from "sonner";
 import {
+  postSupDataRequest,
   postSupSupplyChainTree,
+  type SupDataRequestCreateBody,
   type SupSupplyChainTreeNodeDto,
 } from "../../lib/api/data-mgmt";
 import { 
@@ -42,8 +44,25 @@ type DataManagementNewProps = {
   linkedProject?: DataMgmtLinkedProject | null;
 };
 
+/** 조회 기간 기본 라벨: 캘린더 기준 전월만 (1월이면 작년 12월) */
+function defaultDataMgmtPeriodLabel(): string {
+  const now = new Date();
+  const curY = now.getFullYear();
+  const curM = now.getMonth() + 1;
+  let prevY = curY;
+  let prevM = curM - 1;
+  if (prevM < 1) {
+    prevM = 12;
+    prevY -= 1;
+  }
+  return `${prevY}년 ${prevM}월`;
+}
+
 function periodToYmKorean(period: string): string | null {
-  const m = period.match(/(\d{4})\s*년\s*(\d{1,2})\s*월/);
+  const trimmed = period.trim();
+  if (!trimmed) return null;
+  const matches = [...trimmed.matchAll(/(\d{4})\s*년\s*(\d{1,2})\s*월/g)];
+  const m = matches.length > 0 ? matches[0] : null;
   if (!m) return null;
   return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, "0")}`;
 }
@@ -57,7 +76,7 @@ type SupplierNode = {
   dataStatus: "완료" | "검토중" | "미제출";
   lastUpdate: string;
   dqr: string;
-  pcfStatus: "완료" | "검증중" | "계산 대기" | "미제출";
+  pcfStatus: "완료" | "검증중" | "계산 대기" | "미제출" | "미작성";
   pcfResult: number | null; // kg CO₂e
   children?: SupplierNode[];
   isOwn?: boolean;
@@ -65,6 +84,7 @@ type SupplierNode = {
 
 type RequestModalNode = {
   id: string;
+  nodeId: number | null;
   name: string;
   tier: string;
   children?: RequestModalNode[];
@@ -84,11 +104,18 @@ function mapSupTreeToSupplierNode(
   const pcfStatus: SupplierNode["pcfStatus"] =
     ps === "complete"
       ? "완료"
-      : ps === "verifying"
-        ? "검증중"
-        : ps === "not_submitted"
-          ? "미제출"
-          : "계산 대기";
+      : ps === "not_written"
+        ? "미작성"
+        : ps === "pending_calc"
+          ? "계산 대기"
+        : ps === "verifying"
+          ? "검증중"
+          : ps === "not_submitted"
+            ? "미제출"
+            : "계산 대기";
+  const rawKg = api.pcf_total_co2e_kg;
+  const pcfResult =
+    rawKg != null && Number.isFinite(Number(rawKg)) ? Number(rawKg) : null;
   return {
     id,
     name: api.is_me ? `${api.supplier_name} (나)` : api.supplier_name,
@@ -99,7 +126,7 @@ function mapSupTreeToSupplierNode(
     lastUpdate: api.last_updated?.trim() || "—",
     dqr: api.dqr?.trim() || "—",
     pcfStatus,
-    pcfResult: null,
+    pcfResult,
     isOwn: Boolean(api.is_me),
     children: (api.children ?? []).map((ch) => mapSupTreeToSupplierNode(ch)),
   };
@@ -114,7 +141,7 @@ export function DataManagementNew({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const [period, setPeriod] = useState("");
+  const [period, setPeriod] = useState(defaultDataMgmtPeriodLabel);
   const [showResults, setShowResults] = useState(searchParams.get("show") === "true");
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(() => {
     // P1(동우전자부품): 세진(tier3-1) → 디오(tier4-1) → 4차까지 기본 펼침
@@ -126,15 +153,9 @@ export function DataManagementNew({
     return new Set(['root']);
   });
 
-  type DataRequestStatus = 'NOT_REQUESTED' | 'REQUESTED' | 'SUBMITTED';
-  const LS_REQUEST_STATUS_KEY = 'aifix_mock_data_request_status_by_target_v1';
-  const [requestStatusById, setRequestStatusById] = useState<Record<string, DataRequestStatus>>({});
-
-  type RequestScopeType = '공정 데이터' | '배출계수' | '생산량' | '운송 데이터';
-  const requestScopeOptions: RequestScopeType[] = ['공정 데이터', '배출계수', '생산량', '운송 데이터'];
   const [showRequestModal, setShowRequestModal] = useState(false);
   const [requestTargets, setRequestTargets] = useState<Set<string>>(new Set());
-  const [requestScopes, setRequestScopes] = useState<RequestScopeType[]>([]);
+  const [requestExpandedNodeIds, setRequestExpandedNodeIds] = useState<Set<string>>(new Set(["root"]));
   const [requestMessage, setRequestMessage] = useState('');
   const [requestDueDate, setRequestDueDate] = useState('');
   const [apiRoot, setApiRoot] = useState<SupplierNode | null>(null);
@@ -187,20 +208,9 @@ export function DataManagementNew({
   }, [linkedProject, showResults, period]);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_REQUEST_STATUS_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Record<string, DataRequestStatus>;
-      setRequestStatusById(parsed ?? {});
-    } catch {
-      // ignore (mock)
-    }
-  }, []);
-
-  useEffect(() => {
     if (!showRequestModal) return;
     setRequestTargets(new Set());
-    setRequestScopes([]);
+    setRequestExpandedNodeIds(new Set(["root"]));
     setRequestMessage('');
     setRequestDueDate('');
   }, [showRequestModal]);
@@ -228,14 +238,6 @@ export function DataManagementNew({
     sessionStorage.removeItem(DATA_MGMT_FILTER_STORAGE_KEY);
     sessionStorage.removeItem(DATA_MGMT_BACK_FLAG_KEY);
   }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_REQUEST_STATUS_KEY, JSON.stringify(requestStatusById));
-    } catch {
-      // ignore
-    }
-  }, [LS_REQUEST_STATUS_KEY, requestStatusById]);
 
   // Mock supply chain data (프로젝트/차수 기준으로 "우리회사" 기준점이 달라집니다)
   const supplyChainData: SupplierNode = useMemo(() => {
@@ -579,67 +581,22 @@ export function DataManagementNew({
       (!displayTree.children || displayTree.children.length === 0),
   );
 
-  // 데이터 요청 모달용 트리: p1=전체 하위, p2=세진(나)+직하위(디오/솔브), p3=디오(나)+직하위(켐텍)
   const requestModalTree: RequestModalNode = useMemo(() => {
-    if (tier === 'tier1') {
+    const rootTier = Number((tier || "tier1").replace("tier", "")) || 1;
+    const convert = (node: SupplierNode, depth: number): RequestModalNode => {
+      const tid = rootTier + depth;
+      const parsedNodeId = node.id.startsWith("n-") ? Number(node.id.slice(2)) : null;
       return {
-        id: 'root',
-        name: '동우전자부품 (나)',
-        tier: 'tier1',
-        children: [
-          {
-            id: 'tier2-1',
-            name: '세진케미칼',
-            tier: 'tier2',
-            children: [
-              {
-                id: 'tier3-1',
-                name: '디오케미칼',
-                tier: 'tier3',
-                children: [{ id: 'tier4-1', name: '켐텍소재', tier: 'tier4' }],
-              },
-              { id: 'tier3-2', name: '솔브런트', tier: 'tier3' },
-            ],
-          },
-          { id: 'tier2-2', name: '그린에너지솔루션', tier: 'tier2' },
-        ],
+        id: node.id,
+        nodeId: Number.isFinite(parsedNodeId) ? parsedNodeId : null,
+        name: node.name,
+        tier: `tier${tid}`,
+        children: (node.children ?? []).map((c) => convert(c, depth + 1)),
       };
-    }
-    if (projectId === 'p2' && tier === 'tier2') {
-      return {
-        id: 'root',
-        name: '동우전자부품',
-        tier: 'tier1',
-        children: [
-          {
-            id: 'tier2-1',
-            name: '세진케미칼 (나)',
-            tier: 'tier2',
-            children: [
-              { id: 'tier3-1', name: '디오케미칼', tier: 'tier3' },
-              { id: 'tier3-2', name: '솔브런트', tier: 'tier3' },
-            ],
-          },
-        ],
-      };
-    }
-    if (projectId === 'p3' && tier === 'tier3') {
-      return {
-        id: 'root',
-        name: '세진케미칼',
-        tier: 'tier2',
-        children: [
-          {
-            id: 'tier3-1',
-            name: '디오케미칼 (나)',
-            tier: 'tier3',
-            children: [{ id: 'tier4-1', name: '켐텍소재', tier: 'tier4' }],
-          },
-        ],
-      };
-    }
-    return { id: 'root', name: '-', tier: 'tier0' };
-  }, [projectId, tier]);
+    };
+    if (displayTree) return convert(displayTree, 0);
+    return { id: "root", nodeId: null, name: "-", tier: "tier0" };
+  }, [displayTree, tier]);
 
   const isTargetSelectableByPolicy = (depthFromRoot: number) => {
     if (tier === 'tier1') return depthFromRoot >= 2;
@@ -653,13 +610,6 @@ export function DataManagementNew({
       node.children.forEach((c) => result.push(...collectSelectableTargetIds(c, depth + 1)));
     }
     return result;
-  };
-
-  const getRequestIndicatorForModal = (id: string) => {
-    const st = requestStatusById[id];
-    if (st === 'REQUESTED') return <span title="요청됨" style={{ marginLeft: 6, fontSize: 12 }}>📩</span>;
-    if (st === 'SUBMITTED') return <span title="제출 완료" style={{ marginLeft: 6, fontSize: 12 }}>✅</span>;
-    return null;
   };
 
   const toggleNode = (nodeId: string) => {
@@ -701,6 +651,8 @@ export function DataManagementNew({
         return { bg: "#E3F2FD", text: "#2196F3" };
       case "계산 대기":
         return { bg: "#FFF9C4", text: "#FF9800" };
+      case "미작성":
+        return { bg: "#F3F4F6", text: "#6B7280" };
       case "미제출":
         return { bg: "#FFEBEE", text: "#F44336" };
       default:
@@ -731,16 +683,34 @@ export function DataManagementNew({
     const hasChildren = supplier.children && supplier.children.length > 0;
     const upstreamReady = isUpstreamReady(supplier);
 
+    if (supplier.pcfStatus === "미작성") {
+      return (
+        <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-xs font-medium">
+          미작성
+        </span>
+      );
+    }
     if (supplier.pcfStatus === "미제출") {
       return <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-xs font-medium">데이터 미제출</span>;
     }
     if (hasChildren && !upstreamReady) {
       return <span className="px-3 py-1 bg-orange-100 text-orange-700 rounded-full text-xs font-medium flex items-center gap-1"><AlertTriangle className="w-3 h-3" />하위 데이터 부족</span>;
     }
-    if (supplier.pcfStatus === "계산 대기" && !hasChildren) {
+    if (supplier.pcfStatus === "계산 대기") {
       return <span className="px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-xs font-medium flex items-center gap-1"><Clock className="w-3 h-3" />계산 대기</span>;
     }
-    return <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium flex items-center gap-1"><CheckCircle className="w-3 h-3" />PCF 계산 완료</span>;
+    if (supplier.pcfStatus === "검증중") {
+      return <span className="px-3 py-1 bg-blue-100 text-blue-700 rounded-full text-xs font-medium flex items-center gap-1"><Clock className="w-3 h-3" />검증중</span>;
+    }
+    if (supplier.pcfStatus === "완료" && supplier.pcfResult === null) {
+      return <span className="px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-xs font-medium flex items-center gap-1"><Clock className="w-3 h-3" />계산 대기</span>;
+    }
+    return (
+      <span className="px-3 py-1 bg-green-100 text-green-700 rounded-full text-xs font-medium flex items-center gap-1">
+        <CheckCircle className="w-3 h-3" />
+        PCF 산정 완료
+      </span>
+    );
   };
 
   const renderSupplierRow = (supplier: SupplierNode, level: number = 0) => {
@@ -1000,7 +970,7 @@ export function DataManagementNew({
                 PCF 계산 의존 구조
               </div>
               <div style={{ fontSize: '14px', color: '#0284C7' }}>
-                하위 협력사의 PCF 계산이 완료되어야 상위 기업 PCF를 계산할 수 있습니다. 하위에 "미제출", "검증중", "계산 대기" 상태가 하나라도 있으면 상위 기업은 자동으로 "계산 대기" 상태가 됩니다.
+                행별 상태: 해당 월 데이터를 아직 만들지 않았으면 <strong>미작성</strong>, 저장(초안)은 되었으나 PCF 산정 전이면 <strong>계산 대기</strong>, 산정이 끝나면 <strong>PCF 산정 완료</strong>입니다. 하위 협력사 PCF가 모두 완료되어야 상위 산정이 가능하며, 하위에 미작성·미제출·검증중·계산 대기가 있으면 상위는 <strong>하위 데이터 부족</strong>으로 표시됩니다.
               </div>
             </div>
           </div>
@@ -1053,11 +1023,22 @@ export function DataManagementNew({
           });
         };
 
+        const toggleRequestNodeExpand = (id: string) => {
+          setRequestExpandedNodeIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+          });
+        };
+
         const renderSelectorNode = (node: RequestModalNode, depthFromRoot: number) => {
           const selectable = isTargetSelectableByPolicy(depthFromRoot);
           const disabled = !selectable;
           const checked = requestTargets.has(node.id);
           const isBase = node.id === 'root';
+          const hasChildren = Boolean(node.children && node.children.length > 0);
+          const isExpanded = requestExpandedNodeIds.has(node.id);
 
           return (
             <div key={node.id} style={{ marginLeft: depthFromRoot * 18 }}>
@@ -1065,6 +1046,21 @@ export function DataManagementNew({
                 className="flex items-center gap-2 py-1"
                 style={{ opacity: disabled && !isBase ? 0.45 : 1 }}
               >
+                {hasChildren ? (
+                  <button
+                    type="button"
+                    className="rounded p-0.5 hover:bg-gray-100"
+                    onClick={() => toggleRequestNodeExpand(node.id)}
+                  >
+                    {isExpanded ? (
+                      <ChevronDown className="w-3.5 h-3.5" style={{ color: "var(--aifix-gray)" }} />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5" style={{ color: "var(--aifix-gray)" }} />
+                    )}
+                  </button>
+                ) : (
+                  <div className="w-4 h-4" />
+                )}
                 {isBase ? (
                   <div className="w-4 h-4" />
                 ) : (
@@ -1083,10 +1079,9 @@ export function DataManagementNew({
                 />
                 <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--aifix-navy)' }}>
                   {node.name}
-                  {getRequestIndicatorForModal(node.id)}
                 </span>
               </div>
-              {node.children && node.children.length > 0 && (
+              {hasChildren && isExpanded && (
                 <div>
                   {node.children.map((child) => renderSelectorNode(child, depthFromRoot + 1))}
                 </div>
@@ -1095,28 +1090,65 @@ export function DataManagementNew({
           );
         };
 
-        const handleSendRequests = () => {
+        const handleSendRequests = async () => {
           const targetIds = Array.from(requestTargets);
           if (targetIds.length === 0) {
             alert('요청 대상을 선택해주세요.');
-            return;
-          }
-          if (requestScopes.length === 0) {
-            alert('요청 범위를 선택해주세요.');
             return;
           }
           if (!requestDueDate) {
             alert('제출 기한을 선택해주세요.');
             return;
           }
-          setRequestStatusById((prev) => {
-            const next = { ...prev };
-            targetIds.forEach((id) => {
-              if (next[id] !== 'SUBMITTED') next[id] = 'REQUESTED';
-            });
-            return next;
-          });
-          setShowRequestModal(false);
+          if (!linkedProject) {
+            alert('실데이터 프로젝트에서만 요청 전송이 가능합니다.');
+            return;
+          }
+          if (!linkedProject.productVariantId) {
+            alert('제품 변형 정보가 없어 요청을 전송할 수 없습니다.');
+            return;
+          }
+          const ym = periodToYmKorean(period);
+          if (!ym) {
+            alert('요청 대상 월을 확인할 수 없습니다.');
+            return;
+          }
+          const [ys, ms] = ym.split("-");
+          const reportingYear = parseInt(ys, 10);
+          const reportingMonth = parseInt(ms, 10);
+          const idToNode = new Map<string, RequestModalNode>();
+          const walk = (n: RequestModalNode) => {
+            idToNode.set(n.id, n);
+            n.children?.forEach(walk);
+          };
+          walk(requestModalTree);
+          const targetNodeIds = targetIds
+            .map((id) => idToNode.get(id)?.nodeId ?? null)
+            .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+          if (targetNodeIds.length === 0) {
+            alert('요청 가능한 공급망 노드가 없습니다.');
+            return;
+          }
+          const payload: SupDataRequestCreateBody = {
+            project_id: linkedProject.projectId,
+            product_id: linkedProject.productId,
+            product_variant_id: linkedProject.productVariantId,
+            reporting_year: reportingYear,
+            reporting_month: reportingMonth,
+            requester_supply_chain_node_id: requestModalTree.nodeId,
+            request_mode: "chain",
+            message: requestMessage || null,
+            due_date: requestDueDate,
+            target_supply_chain_node_ids: targetNodeIds,
+          };
+          try {
+            await postSupDataRequest(payload);
+            toast.success(`${targetNodeIds.length}개 대상에게 데이터 요청을 전송했습니다.`);
+            setShowRequestModal(false);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            toast.error(`데이터 요청 전송 실패: ${msg}`);
+          }
         };
 
         const baseSubtreeRoot = requestModalTree;
@@ -1198,32 +1230,7 @@ export function DataManagementNew({
                   </div>
                   <div className="col-span-6">
                     <div className="text-sm font-semibold mb-3" style={{ color: 'var(--aifix-navy)' }}>
-                      ② 요청 범위
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 mb-6">
-                      {requestScopeOptions.map((opt) => {
-                        const checked = requestScopes.includes(opt);
-                        return (
-                          <label key={opt} className="flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={(e) => {
-                                const nextChecked = e.target.checked;
-                                setRequestScopes((prev) =>
-                                  nextChecked ? Array.from(new Set([...prev, opt])) : prev.filter((p) => p !== opt)
-                                );
-                              }}
-                            />
-                            <span className="text-sm" style={{ color: 'var(--aifix-navy)', fontWeight: 650 }}>
-                              {opt}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                    <div className="text-sm font-semibold mb-3" style={{ color: 'var(--aifix-navy)' }}>
-                      ③ 요청 메시지 입력
+                      ② 요청 메시지 입력
                     </div>
                     <textarea
                       value={requestMessage}
@@ -1234,7 +1241,7 @@ export function DataManagementNew({
                     />
                     <div className="mt-6">
                       <div className="text-sm font-semibold mb-3" style={{ color: 'var(--aifix-navy)' }}>
-                        ④ 제출 기한 설정
+                        ③ 제출 기한 설정
                       </div>
                       <input
                         type="date"

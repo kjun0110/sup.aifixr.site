@@ -15,7 +15,8 @@ export function MonthPicker({ value, onChange }: MonthPickerProps) {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const match = value.match(/(\d{4})\s*년\s*(\d{1,2})\s*월/);
+    const matches = [...value.matchAll(/(\d{4})\s*년\s*(\d{1,2})\s*월/g)];
+    const match = matches.length > 0 ? matches[0] : null;
     if (match) {
       setSelectedYear(parseInt(match[1], 10));
       setSelectedMonth(parseInt(match[2], 10));

@@ -328,11 +328,10 @@ export function OcrDataInput() {
                       </th>
                     ))}
                     <th
-                      className={`${cellBase} font-semibold text-center text-gray-900 min-w-[108px] sticky right-0 z-10`}
+                      className={`${cellBase} font-semibold text-center text-gray-900 min-w-[108px]`}
                       style={{
                         borderColor: excelBorder,
                         background: excelHeaderBg,
-                        boxShadow: '-4px 0 8px rgba(0,0,0,0.06)',
                       }}
                     >
                       원본 파일
@@ -352,11 +351,10 @@ export function OcrDataInput() {
                       </td>
                     ))}
                     <td
-                      className={`${cellBase} text-center sticky right-0 z-10`}
+                      className={`${cellBase} text-center`}
                       style={{
                         borderColor: excelBorder,
                         background: excelCellBg,
-                        boxShadow: '-4px 0 8px rgba(0,0,0,0.04)',
                       }}
                     >
                       {currentRow ? (

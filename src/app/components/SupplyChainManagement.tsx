@@ -1147,6 +1147,30 @@ export function SupplyChainManagement({
         const liveParentNodeId = inviteContext?.parentNodeId;
         const isLiveRegister = liveProjectId != null && liveParentNodeId != null;
 
+        const registerNameTrim = (selectedRegisterCompany?.name ?? companyQuery).trim();
+        const registerBizTrim = registerBusinessNumber.trim();
+        const registerOrderTrim = registerOrderProductName.trim();
+        const registerQtyTrim = registerMonthlyQty.trim();
+        const registerQtyNum = Number(registerQtyTrim);
+        const registerUnitTrim = registerUnit.trim();
+        const registerDatesValid =
+          Boolean(registerContractStart && registerContractEnd) &&
+          registerContractEnd >= registerContractStart;
+        const registerQtyValid =
+          registerQtyTrim !== "" &&
+          Number.isFinite(registerQtyNum) &&
+          registerQtyNum >= 0;
+        const registerCompanyOk = isLiveRegister
+          ? registerNameTrim.length > 0
+          : selectedRegisterCompany != null;
+        const isRegisterFormComplete =
+          registerCompanyOk &&
+          registerBizTrim.length > 0 &&
+          registerOrderTrim.length > 0 &&
+          registerDatesValid &&
+          registerQtyValid &&
+          registerUnitTrim.length > 0;
+
         const handleRegister = () => {
           void (async () => {
             const biz = registerBusinessNumber.trim();
@@ -1185,6 +1209,10 @@ export function SupplyChainManagement({
                 return;
               }
               const unitTrim = registerUnit.trim();
+              if (!unitTrim) {
+                toast.error("단위를 입력해 주세요.");
+                return;
+              }
               setRegisterSubmitting(true);
               try {
                 await postRegisterDirectChild(liveProjectId, {
@@ -1194,7 +1222,7 @@ export function SupplyChainManagement({
                   contract_start: registerContractStart,
                   contract_end: registerContractEnd,
                   monthly_planned_qty: qtyNum,
-                  unit: unitTrim ? unitTrim : null,
+                  unit: unitTrim,
                 });
                 close();
                 toast.success("등록되었습니다", {
@@ -1215,6 +1243,33 @@ export function SupplyChainManagement({
             }
             if (!biz) {
               toast.error("사업자등록번호를 입력해 주세요.");
+              return;
+            }
+            const orderNameMock = registerOrderProductName.trim();
+            if (!orderNameMock) {
+              toast.error("수주 제품명을 입력해 주세요.");
+              return;
+            }
+            if (!registerContractStart || !registerContractEnd) {
+              toast.error("계약 시작일과 종료일을 선택해 주세요.");
+              return;
+            }
+            if (registerContractEnd < registerContractStart) {
+              toast.error("계약 종료일은 시작일 이후여야 합니다.");
+              return;
+            }
+            const qtyRawM = registerMonthlyQty.trim();
+            if (qtyRawM === "") {
+              toast.error("월 예정 수주 수량을 입력해 주세요.");
+              return;
+            }
+            const qtyNumM = Number(qtyRawM);
+            if (!Number.isFinite(qtyNumM) || qtyNumM < 0) {
+              toast.error("월 예정 수주 수량은 0 이상의 숫자로 입력해 주세요.");
+              return;
+            }
+            if (!registerUnit.trim()) {
+              toast.error("단위를 입력해 주세요.");
               return;
             }
 
@@ -1284,7 +1339,7 @@ export function SupplyChainManagement({
                 {/* 1. 회사명 — 전체 너비, 안내는 입력 아래 */}
                 <div className="w-full">
                   <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
-                    1. 회사명
+                    1. 회사명 <span className="text-red-500">*</span>
                   </div>
                   {isLiveRegister ? (
                     <div>
@@ -1357,7 +1412,7 @@ export function SupplyChainManagement({
                 {/* 2. 사업자등록번호 — 다음 행 전체 너비 */}
                 <div className="w-full">
                   <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
-                    2. 사업자등록번호
+                    2. 사업자등록번호 <span className="text-red-500">*</span>
                   </div>
                   <input
                     value={registerBusinessNumber}
@@ -1371,7 +1426,7 @@ export function SupplyChainManagement({
                 {/* 3. 수주 제품명 — 전체 너비 */}
                 <div className="w-full">
                   <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
-                    3. 수주 제품명
+                    3. 수주 제품명 <span className="text-red-500">*</span>
                   </div>
                   <input
                     value={registerOrderProductName}
@@ -1388,7 +1443,7 @@ export function SupplyChainManagement({
                 {/* 4. 계약기간 — 블록 전체 너비, 시작~종료 가로 */}
                 <div className="w-full">
                   <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
-                    4. 계약기간
+                    4. 계약기간 <span className="text-red-500">*</span>
                   </div>
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3 w-full">
                     <input
@@ -1417,7 +1472,7 @@ export function SupplyChainManagement({
                 {/* 5. 월 예정 수주 수량 — 수량 넓게 + 단위 좁게 */}
                 <div className="w-full">
                   <div className="text-sm font-semibold mb-2" style={{ color: "var(--aifix-navy)" }}>
-                    5. 월 예정 수주 수량
+                    5. 월 예정 수주 수량·단위 <span className="text-red-500">*</span>
                   </div>
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3 w-full">
                     <input
@@ -1455,14 +1510,19 @@ export function SupplyChainManagement({
                 </button>
                 <button
                   type="button"
-                  disabled={registerSubmitting}
+                  disabled={registerSubmitting || !isRegisterFormComplete}
                   onClick={handleRegister}
                   className="px-6 py-3 rounded-xl transition-all text-white disabled:cursor-not-allowed"
                   style={{
                     background: "linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)",
                     fontWeight: 800,
-                    opacity: registerSubmitting ? 0.55 : 1,
+                    opacity: registerSubmitting || !isRegisterFormComplete ? 0.45 : 1,
                   }}
+                  title={
+                    !isRegisterFormComplete
+                      ? "필수 항목을 모두 입력해 주세요."
+                      : undefined
+                  }
                 >
                   {registerSubmitting ? "등록 중…" : "등록하기"}
                 </button>

@@ -1,6 +1,6 @@
 'use client';
 
-import { Plus, X } from "lucide-react";
+import { Pencil, Plus, TableProperties, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -13,8 +13,12 @@ import {
   patchMySupplierProfile,
   type SupplierProfileMe,
 } from "@/lib/api/supplierProfile";
-import { useSites } from "../contexts/SiteContext";
-import type { Site } from "../contexts/SiteContext";
+import { searchRmiSmelters, type RefRmiSmelterItem } from "@/lib/api/dataMgmtReference";
+import {
+  emptySiteForm,
+  useSites,
+  type Site,
+} from "../contexts/SiteContext";
 
 type ProfileTab = 'basic' | 'contacts' | 'sites';
 
@@ -70,6 +74,23 @@ function isKnownSupplierType(supplierType: string): boolean {
   return SUPPLIER_TYPE_OPTIONS.some((o) => o.value === t);
 }
 
+/** 사업장 표 조회: 미입력 칸 */
+function displaySiteCell(value: unknown): string {
+  const t = value == null ? "" : String(value).trim();
+  return t === "" ? "미기입" : t;
+}
+
+/**
+ * RMI: 가공사/제련사만 미인증·저장값 표시. 그 외 유형 → 해당없음 (데이터 입력 화면과 동일 규칙).
+ */
+function displayRmiForSiteTable(supplierType: string, rmiStored: unknown): string {
+  if (isSmelterSupplierType(supplierType)) {
+    const r = rmiStored == null ? "" : String(rmiStored).trim();
+    return r === "" ? "미인증" : r;
+  }
+  return "해당없음";
+}
+
 type BasicFormState = {
   company_name: string;
   business_reg_no: string;
@@ -112,18 +133,25 @@ function deriveCountryFromAddress(address: string): string {
   return '';
 }
 
+/** 스킴·호스트 없이 스킴만 저장된 값은 빈 칸으로 표시 */
+function normalizeWebsiteUrlForForm(raw: string | null | undefined): string {
+  const t = (raw ?? '').trim();
+  if (t === '' || t === 'https://' || t === 'http://') return '';
+  return t;
+}
+
 function profileToBasicForm(p: SupplierProfileMe): BasicFormState {
   return {
     company_name: p.company_name ?? '',
     business_reg_no: p.business_reg_no ?? '',
     country_location: p.country_location ?? '',
     address: (p.address ?? '').trim(),
-    duns_number: p.duns_number ?? '',
-    tax_id: p.tax_id ?? '',
-    website_url: p.website_url ?? '',
+    duns_number: (p.duns_number ?? '').trim(),
+    tax_id: (p.tax_id ?? '').trim(),
+    website_url: normalizeWebsiteUrlForForm(p.website_url),
     rep_name: (p.rep_name ?? '').trim(),
-    rep_email: p.rep_email ?? '',
-    rep_phone: p.rep_phone ?? '',
+    rep_email: (p.rep_email ?? '').trim(),
+    rep_phone: (p.rep_phone ?? '').trim(),
     supplier_type: p.supplier_type ?? '',
     rmi_certified: p.rmi_certified ?? '',
     feoc_status: p.feoc_status ?? '',
@@ -140,13 +168,41 @@ type ContactRow = {
 
 export function CompanyProfile() {
   const router = useRouter();
-  const { sites, addSite } = useSites();
+  const {
+    sites,
+    sitesLoading,
+    sitesError,
+    addSite,
+    updateSite,
+    deleteSite,
+    refreshSites,
+  } = useSites();
   const [activeTab, setActiveTab] = useState<ProfileTab>('basic');
   const [profile, setProfile] = useState<SupplierProfileMe | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [basicForm, setBasicForm] = useState<BasicFormState>(EMPTY_BASIC_FORM);
   const [basicSaving, setBasicSaving] = useState(false);
+  const [showRmiPicker, setShowRmiPicker] = useState(false);
+  const [rmiQuery, setRmiQuery] = useState("");
+  const [rmiReportType, setRmiReportType] = useState("");
+  const [rmiResults, setRmiResults] = useState<RefRmiSmelterItem[]>([]);
+  const [rmiTotal, setRmiTotal] = useState(0);
+  const [rmiLoading, setRmiLoading] = useState(false);
+  const [selectedRmiId, setSelectedRmiId] = useState<number | null>(null);
+  const [rmiOffset, setRmiOffset] = useState(0);
+  const RMI_PAGE_SIZE = 50;
+  const rmiCurrentPage = Math.floor(rmiOffset / RMI_PAGE_SIZE) + 1;
+  const rmiTotalPages = Math.max(1, Math.ceil(rmiTotal / RMI_PAGE_SIZE));
+  const rmiPageWindow = 10;
+  const rmiPageStart = Math.max(
+    1,
+    Math.min(
+      rmiCurrentPage - Math.floor(rmiPageWindow / 2),
+      Math.max(1, rmiTotalPages - rmiPageWindow + 1),
+    ),
+  );
+  const rmiPageEnd = Math.min(rmiTotalPages, rmiPageStart + rmiPageWindow - 1);
 
   useEffect(() => {
     let cancelled = false;
@@ -208,36 +264,15 @@ export function CompanyProfile() {
     }));
   }, [profile]);
   const [showModal, setShowModal] = useState(false);
+  const [editingServerId, setEditingServerId] = useState<number | null>(null);
+  const [siteSaving, setSiteSaving] = useState(false);
   const [isSameAsHeadquarter, setIsSameAsHeadquarter] = useState(false);
-  const [newSite, setNewSite] = useState<Site>({
-    id: '',
-    name: '',
-    country: '',
-    address: '',
-    representative: '',
-    email: '',
-    phone: '',
-    renewableEnergy: '',
-    certification: '',
-    rmiSmelter: '',
-    feoc: '',
-  });
+  const [newSite, setNewSite] = useState<Site>(() => emptySiteForm());
 
   const resetSiteForm = () => {
     setIsSameAsHeadquarter(false);
-    setNewSite({
-      id: '',
-      name: '',
-      country: '',
-      address: '',
-      representative: '',
-      email: '',
-      phone: '',
-      renewableEnergy: '',
-      certification: '',
-      rmiSmelter: '',
-      feoc: '',
-    });
+    setEditingServerId(null);
+    setNewSite(emptySiteForm());
   };
 
   const companyRegistrationNumber =
@@ -249,9 +284,10 @@ export function CompanyProfile() {
       const addr = (basicForm.address || profile.address || '').trim();
       const loc = (basicForm.country_location || profile.country_location || '').trim();
       const countryVal = loc || deriveCountryFromAddress(addr);
+      const brn = basicForm.business_reg_no.trim();
       return {
         ...prev,
-        id: basicForm.business_reg_no.trim() || prev.id,
+        businessRegNo: brn || prev.businessRegNo,
         name: basicForm.company_name.trim() || prev.name,
         country: countryVal || prev.country,
         address: addr || prev.address,
@@ -298,6 +334,58 @@ export function CompanyProfile() {
     }
   };
 
+  const handleSearchRmi = async (nextOffset = 0) => {
+    setRmiLoading(true);
+    try {
+      await restoreSupSessionFromCookie();
+      const res = await searchRmiSmelters({
+        q: rmiQuery,
+        reportType: rmiReportType || undefined,
+        limit: RMI_PAGE_SIZE,
+        offset: nextOffset,
+      });
+      setRmiResults(res.items);
+      setRmiTotal(res.total);
+      setSelectedRmiId(null);
+      setRmiOffset(nextOffset);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "RMI 스멜터 조회에 실패했습니다.");
+      setRmiResults([]);
+      setRmiTotal(0);
+      setRmiOffset(0);
+    } finally {
+      setRmiLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!showRmiPicker) return;
+    // 모달 오픈 직후 빈 화면 대신 기본 목록(CMRT)을 즉시 보여준다.
+    setRmiReportType((prev) => prev || "CMRT");
+    void (async () => {
+      setRmiLoading(true);
+      try {
+        await restoreSupSessionFromCookie();
+        const res = await searchRmiSmelters({
+          q: "",
+          reportType: rmiReportType || "CMRT",
+          limit: RMI_PAGE_SIZE,
+          offset: 0,
+        });
+        setRmiResults(res.items);
+        setRmiTotal(res.total);
+        setSelectedRmiId(null);
+        setRmiOffset(0);
+      } catch {
+        setRmiResults([]);
+        setRmiTotal(0);
+      } finally {
+        setRmiLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showRmiPicker]);
+
   const basicFieldRows: { key: keyof BasicFormState; label: string; required?: boolean; type?: string; placeholder?: string }[] = [
     { key: 'company_name', label: '회사명', required: true },
     { key: 'business_reg_no', label: '사업자등록번호', required: true },
@@ -319,14 +407,58 @@ export function CompanyProfile() {
 
   const showRmiField = isSmelterSupplierType(basicForm.supplier_type);
 
-  const handleAddSite = () => {
-    if (!newSite.id || !newSite.name) {
-      alert('사업장번호와 사업장명은 필수 입력입니다.');
+  const handleSaveSite = async () => {
+    if (!newSite.name.trim()) {
+      toast.error('사업장 명은 필수입니다.');
       return;
     }
-    addSite(newSite);
-    resetSiteForm();
-    setShowModal(false);
+    if (!newSite.branchWorkplaceNo.trim()) {
+      toast.error('종사업장번호를 입력해 주세요.');
+      return;
+    }
+    if (!profile?.has_profile) {
+      toast.error('승인된 회사 프로필이 있어야 사업장을 저장할 수 있습니다.');
+      return;
+    }
+    setSiteSaving(true);
+    try {
+      await restoreSupSessionFromCookie();
+      if (editingServerId != null) {
+        await updateSite(editingServerId, newSite);
+        toast.success('사업장 정보를 수정했습니다.');
+      } else {
+        await addSite(newSite);
+        toast.success('사업장을 등록했습니다.');
+      }
+      resetSiteForm();
+      setShowModal(false);
+      await refreshSites();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '저장에 실패했습니다.');
+    } finally {
+      setSiteSaving(false);
+    }
+  };
+
+  const openEditSite = (site: Site) => {
+    if (site.serverId == null) return;
+    setEditingServerId(site.serverId);
+    setIsSameAsHeadquarter(false);
+    setNewSite({ ...site });
+    setShowModal(true);
+  };
+
+  const handleDeleteSite = async (site: Site) => {
+    if (site.serverId == null) return;
+    if (!window.confirm(`「${site.name}」 사업장을 삭제할까요?`)) return;
+    try {
+      await restoreSupSessionFromCookie();
+      await deleteSite(site.serverId);
+      toast.success('삭제했습니다.');
+      await refreshSites();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '삭제에 실패했습니다.');
+    }
   };
 
   const tabs: { id: ProfileTab; label: string }[] = [
@@ -482,18 +614,36 @@ export function CompanyProfile() {
                               <p className="text-xs text-gray-500 mb-2">
                                 가공사/제련사인 경우에만 입력합니다.
                               </p>
-                              <input
-                                type="text"
-                                value={basicForm.rmi_certified}
-                                onChange={(e) =>
-                                  setBasicForm((prev) => ({
-                                    ...prev,
-                                    rmi_certified: e.target.value,
-                                  }))
-                                }
-                                placeholder="예: 인증됨 / 미인증 / 진행중"
-                                className="w-full max-w-xl px-3 py-2 rounded-lg border border-gray-200 text-[var(--aifix-navy)] focus:outline-none focus:ring-2 focus:ring-[var(--aifix-primary)]/30 focus:border-[var(--aifix-primary)]"
-                              />
+                              <div className="flex w-full max-w-xl items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={basicForm.rmi_certified}
+                                  onChange={(e) =>
+                                    setBasicForm((prev) => ({
+                                      ...prev,
+                                      rmi_certified: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="예: 인증됨 / 미인증 / 진행중"
+                                  className="min-w-0 flex-1 px-3 py-2 rounded-lg border border-gray-200 text-[var(--aifix-navy)] focus:outline-none focus:ring-2 focus:ring-[var(--aifix-primary)]/30 focus:border-[var(--aifix-primary)]"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setShowRmiPicker(true);
+                                    setRmiQuery("");
+                                    setRmiReportType("CMRT");
+                                    setRmiResults([]);
+                                    setRmiTotal(0);
+                                    setSelectedRmiId(null);
+                                    setRmiOffset(0);
+                                  }}
+                                  className="inline-flex items-center gap-2 rounded-lg border border-gray-300 px-3 py-2 text-sm text-[var(--aifix-navy)] hover:bg-gray-50"
+                                >
+                                  <TableProperties className="h-4 w-4 text-[#5B3BFA]" />
+                                  RMI 스멜터 검색
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ) : null}
@@ -599,52 +749,188 @@ export function CompanyProfile() {
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-4 mb-6">
                 <button
                   type="button"
+                  disabled={!profile?.has_profile}
                   onClick={() => {
                     resetSiteForm();
                     setShowModal(true);
                   }}
-                  className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90 shrink-0"
+                  className="flex items-center justify-center gap-2 px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90 shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
                   style={{ background: 'var(--aifix-primary)' }}
+                  title={!profile?.has_profile ? '승인된 프로필이 있어야 사업장을 추가할 수 있습니다.' : undefined}
                 >
                   <Plus className="w-5 h-5" />
                   <span style={{ fontWeight: 600 }}>사업장 추가</span>
                 </button>
               </div>
+              {sitesError ? (
+                <p className="text-sm text-red-600 mb-4" role="alert">
+                  {sitesError}
+                </p>
+              ) : null}
               <div className="overflow-x-auto rounded-xl border border-gray-200">
-                <table className={PROFILE_TABLE}>
-                  <thead>
-                    <tr>
-                      <th className={PROFILE_TH}>사업장 명</th>
-                      <th className={PROFILE_TH}>사업자등록번호</th>
-                      <th className={PROFILE_TH}>종사업장번호</th>
-                      <th className={PROFILE_TH}>사업장번호</th>
-                      <th className={PROFILE_TH}>국가 소재지</th>
-                      <th className={PROFILE_TH}>상세주소</th>
-                      <th className={PROFILE_TH}>대표자명</th>
-                      <th className={PROFILE_TH}>대표 이메일</th>
-                      <th className={PROFILE_TH}>대표자 연락처</th>
-                      <th className={PROFILE_TH}>RMI 인증 여부</th>
-                      <th className={PROFILE_TH}>FEOC 여부</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sites.map((site, index) => (
-                      <tr key={index} className="hover:bg-gray-50 transition-colors">
-                        <td className={PROFILE_TD}>{site.name}</td>
-                        <td className={PROFILE_TD}>{companyRegistrationNumber}</td>
-                        <td className={PROFILE_TD}>{site.id}</td>
-                        <td className={PROFILE_TD}>{site.id}</td>
-                        <td className={PROFILE_TD}>{site.country}</td>
-                        <td className={PROFILE_TD}>{site.address}</td>
-                        <td className={PROFILE_TD}>{site.representative}</td>
-                        <td className={PROFILE_TD}>{site.email}</td>
-                        <td className={PROFILE_TD}>{site.phone}</td>
-                        <td className={PROFILE_TD}>{site.rmiSmelter}</td>
-                        <td className={PROFILE_TD}>{site.feoc}</td>
+                {sitesLoading ? (
+                  <div className="px-4 py-8 text-sm text-gray-500">사업장 목록을 불러오는 중…</div>
+                ) : (
+                  <table className={PROFILE_TABLE}>
+                    <thead>
+                      <tr>
+                        <th className={PROFILE_TH}>사업장 명</th>
+                        <th className={PROFILE_TH}>사업자등록번호</th>
+                        <th className={PROFILE_TH}>종사업장번호</th>
+                        <th className={PROFILE_TH}>국가 소재지</th>
+                        <th className={PROFILE_TH}>상세주소</th>
+                        <th className={PROFILE_TH}>대표자명</th>
+                        <th className={PROFILE_TH}>대표 이메일</th>
+                        <th className={PROFILE_TH}>대표자 연락처</th>
+                        <th className={PROFILE_TH}>RMI 인증 여부</th>
+                        <th className={PROFILE_TH}>FEOC 여부</th>
+                        <th className={PROFILE_TH}>관리</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {!profile?.has_profile && sites.length === 0 ? (
+                        <tr>
+                          <td className={PROFILE_TD} colSpan={11}>
+                            승인된 회사 프로필이 있으면 사업장을 DB에 저장할 수 있습니다.
+                          </td>
+                        </tr>
+                      ) : (
+                        <>
+                          {profile?.has_profile ? (
+                            <tr
+                              key="__company-hq__"
+                              className="hover:bg-gray-50 transition-colors bg-slate-50/50"
+                            >
+                              <td className={PROFILE_TD}>
+                                {(() => {
+                                  const cn = (
+                                    basicForm.company_name ||
+                                    profile.company_name ||
+                                    ""
+                                  ).trim();
+                                  return cn ? `${cn}(본사)` : "미기입(본사)";
+                                })()}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(companyRegistrationNumber)}
+                              </td>
+                              <td className={PROFILE_TD}>-</td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(
+                                  (
+                                    basicForm.country_location ||
+                                    profile.country_location ||
+                                    ""
+                                  ).trim() ||
+                                    deriveCountryFromAddress(
+                                      (
+                                        basicForm.address ||
+                                        profile.address ||
+                                        ""
+                                      ).trim(),
+                                    ),
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(
+                                  basicForm.address || profile.address || "",
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(
+                                  basicForm.rep_name || profile.rep_name || "",
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(
+                                  basicForm.rep_email || profile.rep_email || "",
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(
+                                  basicForm.rep_phone || profile.rep_phone || "",
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                {displayRmiForSiteTable(
+                                  basicForm.supplier_type || profile.supplier_type || "",
+                                  basicForm.rmi_certified || profile.rmi_certified || "",
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(
+                                  basicForm.feoc_status || profile.feoc_status || "",
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                <span
+                                  className="text-xs text-gray-500"
+                                  title="기업 기본정보 탭에서 수정합니다."
+                                >
+                                  기본정보 연동
+                                </span>
+                              </td>
+                            </tr>
+                          ) : null}
+                          {sites.map((site) => (
+                            <tr
+                              key={site.serverId ?? site.id}
+                              className="hover:bg-gray-50 transition-colors"
+                            >
+                              <td className={PROFILE_TD}>{displaySiteCell(site.name)}</td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(
+                                  site.businessRegNo.trim() || companyRegistrationNumber,
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(site.branchWorkplaceNo)}
+                              </td>
+                              <td className={PROFILE_TD}>{displaySiteCell(site.country)}</td>
+                              <td className={PROFILE_TD}>{displaySiteCell(site.address)}</td>
+                              <td className={PROFILE_TD}>
+                                {displaySiteCell(site.representative)}
+                              </td>
+                              <td className={PROFILE_TD}>{displaySiteCell(site.email)}</td>
+                              <td className={PROFILE_TD}>{displaySiteCell(site.phone)}</td>
+                              <td className={PROFILE_TD}>
+                                {displayRmiForSiteTable(
+                                  basicForm.supplier_type,
+                                  site.rmiSmelter,
+                                )}
+                              </td>
+                              <td className={PROFILE_TD}>{displaySiteCell(site.feoc)}</td>
+                              <td className={PROFILE_TD}>
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={site.serverId == null || !profile?.has_profile}
+                                    onClick={() => openEditSite(site)}
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-gray-200 text-sm hover:bg-gray-50 disabled:opacity-40"
+                                    aria-label="수정"
+                                  >
+                                    <Pencil className="w-4 h-4" />
+                                    수정
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={site.serverId == null || !profile?.has_profile}
+                                    onClick={() => void handleDeleteSite(site)}
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-red-200 text-red-700 text-sm hover:bg-red-50 disabled:opacity-40"
+                                    aria-label="삭제"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                    삭제
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </>
+                      )}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </>
           )}
@@ -666,7 +952,7 @@ export function CompanyProfile() {
           >
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-2xl" style={{ fontWeight: 700, color: 'var(--aifix-navy)' }}>
-                사업장 등록
+                {editingServerId != null ? '사업장 수정' : '사업장 등록'}
               </h3>
               <button
                 type="button"
@@ -715,12 +1001,29 @@ export function CompanyProfile() {
             <div className="grid grid-cols-2 gap-6">
               <div>
                 <label className="block mb-2" style={{ fontWeight: 500, color: 'var(--aifix-gray)' }}>
-                  사업장번호 *
+                  종사업장번호 <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
-                  value={newSite.id}
-                  onChange={(e) => setNewSite({ ...newSite, id: e.target.value })}
+                  value={newSite.branchWorkplaceNo}
+                  onChange={(e) => setNewSite({ ...newSite, branchWorkplaceNo: e.target.value })}
+                  placeholder="예: FAC-HQ"
+                  className="w-full px-4 py-2 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2"
+                  style={{ borderColor: '#E2E8F0', color: 'var(--aifix-navy)' }}
+                  onFocus={(e) => (e.target.style.borderColor = 'var(--aifix-primary)')}
+                  onBlur={(e) => (e.target.style.borderColor = '#E2E8F0')}
+                />
+              </div>
+
+              <div>
+                <label className="block mb-2" style={{ fontWeight: 500, color: 'var(--aifix-gray)' }}>
+                  사업자등록번호 (사업장 단위)
+                </label>
+                <input
+                  type="text"
+                  value={newSite.businessRegNo}
+                  onChange={(e) => setNewSite({ ...newSite, businessRegNo: e.target.value })}
+                  placeholder="비우면 법인 기본 사업자번호와 별도인 경우만 입력"
                   className="w-full px-4 py-2 rounded-lg border transition-all duration-200 focus:outline-none focus:ring-2"
                   style={{ borderColor: '#E2E8F0', color: 'var(--aifix-navy)' }}
                   onFocus={(e) => (e.target.style.borderColor = 'var(--aifix-primary)')}
@@ -867,11 +1170,215 @@ export function CompanyProfile() {
               </button>
               <button
                 type="button"
-                onClick={handleAddSite}
-                className="px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90"
+                disabled={siteSaving}
+                onClick={() => void handleSaveSite()}
+                className="px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90 disabled:opacity-50"
                 style={{ background: 'var(--aifix-primary)', fontWeight: 600 }}
               >
-                저장
+                {siteSaving ? '저장 중…' : '저장'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showRmiPicker && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setShowRmiPicker(false)}
+        >
+          <div
+            className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+              <h3 className="text-lg font-bold text-[var(--aifix-navy)]">RMI 스멜터 검색</h3>
+              <button
+                type="button"
+                onClick={() => setShowRmiPicker(false)}
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                aria-label="닫기"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="flex flex-wrap items-end gap-3 border-b border-gray-200 px-5 py-3">
+              <label className="flex min-w-[16rem] flex-1 flex-col gap-1 text-xs text-gray-600">
+                검색어 (smelter_id/명칭/국가/도시)
+                <input
+                  value={rmiQuery}
+                  onChange={(e) => setRmiQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void handleSearchRmi(0);
+                  }}
+                  className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                  placeholder="예: CID002030, Perth Mint"
+                />
+              </label>
+              <label className="flex min-w-[10rem] flex-col gap-1 text-xs text-gray-600">
+                타입
+                <select
+                  value={rmiReportType}
+                  onChange={(e) => setRmiReportType(e.target.value)}
+                  className="rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                >
+                  <option value="">전체</option>
+                  <option value="CMRT">CMRT</option>
+                  <option value="AMRT">AMRT</option>
+                  <option value="EMRT">EMRT</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => void handleSearchRmi(0)}
+                disabled={rmiLoading}
+                className="rounded-lg bg-[var(--aifix-primary)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {rmiLoading ? "조회 중..." : "검색"}
+              </button>
+            </div>
+            <div className="px-5 py-3 text-sm text-gray-600">
+              검색 결과: {rmiTotal}건
+              <span className="ml-3 text-gray-500">
+                ({rmiTotal === 0 ? 0 : rmiOffset + 1} - {Math.min(rmiOffset + rmiResults.length, rmiTotal)})
+              </span>
+            </div>
+            <div className="max-h-[56vh] overflow-auto border-t border-gray-100">
+              <table className={PROFILE_TABLE}>
+                <thead>
+                  <tr>
+                    <th className={PROFILE_TH} style={{ width: "64px" }}>선택</th>
+                    <th className={PROFILE_TH}>타입</th>
+                    <th className={PROFILE_TH}>금속</th>
+                    <th className={PROFILE_TH}>Smelter ID</th>
+                    <th className={PROFILE_TH}>표준 스멜터명</th>
+                    <th className={PROFILE_TH}>국가/도시</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rmiResults.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-500">
+                        {rmiLoading ? "조회 중..." : "검색 결과가 없습니다."}
+                      </td>
+                    </tr>
+                  ) : (
+                    rmiResults.map((row) => (
+                      <tr
+                        key={row.id}
+                        className="cursor-pointer hover:bg-gray-50"
+                        onClick={() =>
+                          setSelectedRmiId((prev) => (prev === row.id ? null : row.id))
+                        }
+                      >
+                        <td className={PROFILE_TD}>
+                          <input
+                            type="checkbox"
+                            checked={selectedRmiId === row.id}
+                            onChange={(e) => setSelectedRmiId(e.target.checked ? row.id : null)}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{ accentColor: "var(--aifix-primary)" }}
+                          />
+                        </td>
+                        <td className={PROFILE_TD}>{row.report_type}</td>
+                        <td className={PROFILE_TD}>{row.metal}</td>
+                        <td className={PROFILE_TD}>
+                          <code>{row.smelter_id}</code>
+                        </td>
+                        <td className={PROFILE_TD}>
+                          <div className="max-w-[24rem] truncate" title={row.standard_smelter_name}>
+                            {row.standard_smelter_name}
+                          </div>
+                        </td>
+                        <td className={PROFILE_TD}>
+                          <div className="max-w-[14rem] truncate" title={`${row.country} / ${row.city}`}>
+                            {row.country} / {row.city}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex items-center justify-center border-t border-gray-100 px-5 py-3">
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={rmiLoading || rmiCurrentPage <= 1}
+                  onClick={() => void handleSearchRmi(0)}
+                  className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  aria-label="첫 페이지"
+                >
+                  {"<<"}
+                </button>
+                <button
+                  type="button"
+                  disabled={rmiLoading || rmiCurrentPage <= 1}
+                  onClick={() => void handleSearchRmi(Math.max(0, (rmiCurrentPage - 2) * RMI_PAGE_SIZE))}
+                  className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  aria-label="이전 페이지"
+                >
+                  {"<"}
+                </button>
+                {Array.from({ length: rmiPageEnd - rmiPageStart + 1 }, (_, i) => rmiPageStart + i).map((p) => {
+                  const active = p === rmiCurrentPage;
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      disabled={rmiLoading || p < 1 || p > rmiTotalPages}
+                      onClick={() => void handleSearchRmi((p - 1) * RMI_PAGE_SIZE)}
+                      className={`min-w-8 rounded-lg border px-2.5 py-1.5 text-sm ${
+                        active
+                          ? "border-[var(--aifix-primary)] bg-[var(--aifix-primary)] text-white"
+                          : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                      } disabled:opacity-50`}
+                    >
+                      {p}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  disabled={rmiLoading || rmiCurrentPage >= rmiTotalPages}
+                  onClick={() => void handleSearchRmi(rmiCurrentPage * RMI_PAGE_SIZE)}
+                  className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  aria-label="다음 페이지"
+                >
+                  {">"}
+                </button>
+                <button
+                  type="button"
+                  disabled={rmiLoading || rmiCurrentPage >= rmiTotalPages}
+                  onClick={() => void handleSearchRmi((rmiTotalPages - 1) * RMI_PAGE_SIZE)}
+                  className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  aria-label="마지막 페이지"
+                >
+                  {">>"}
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setShowRmiPicker(false)}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                disabled={selectedRmiId == null}
+                onClick={() => {
+                  const row = rmiResults.find((x) => x.id === selectedRmiId);
+                  if (!row) return;
+                  setBasicForm((prev) => ({ ...prev, rmi_certified: row.smelter_id }));
+                  setShowRmiPicker(false);
+                  toast.success(`RMI 선택: ${row.smelter_id}`);
+                }}
+                className="rounded-lg bg-[var(--aifix-primary)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                적용
               </button>
             </div>
           </div>
