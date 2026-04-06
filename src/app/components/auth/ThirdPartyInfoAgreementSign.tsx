@@ -134,11 +134,6 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
     }
   };
 
-  const handleApprovalConfirm = () => {
-    setApprovalPopupOpen(false);
-    router.push('/projects');
-  };
-
   // 로딩 중
   if (isLoading) {
     return (

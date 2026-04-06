@@ -481,7 +481,8 @@ export function SupplierInviteModal({
       return;
     }
 
-    if (useLiveApi && inviteContext?.parentNodeId != null) {
+    if (useLiveApi && inviteContext != null && inviteContext.parentNodeId != null) {
+      const parentSupplyChainNodeId = inviteContext.parentNodeId;
       const missingChild = filled.find(
         (r) => r.childSupplyChainNodeId == null || r.childSupplyChainNodeId < 1,
       );
@@ -492,7 +493,7 @@ export function SupplierInviteModal({
       const bodyForBackend = emailBody.trim().replace(/https?:\/\/[^\s]+/g, "{link}");
 
       const payloads: SupInvitePayload[] = filled.map((r) => ({
-        parent_supply_chain_node_id: inviteContext.parentNodeId,
+        parent_supply_chain_node_id: parentSupplyChainNodeId,
         child_supply_chain_node_id: r.childSupplyChainNodeId ?? undefined,
         invitee: {
           company_name: r.companyName,
