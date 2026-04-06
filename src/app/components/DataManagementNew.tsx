@@ -1083,7 +1083,7 @@ export function DataManagementNew({
               </div>
               {hasChildren && isExpanded && (
                 <div>
-                  {node.children.map((child) => renderSelectorNode(child, depthFromRoot + 1))}
+                  {(node.children ?? []).map((child) => renderSelectorNode(child, depthFromRoot + 1))}
                 </div>
               )}
             </div>
