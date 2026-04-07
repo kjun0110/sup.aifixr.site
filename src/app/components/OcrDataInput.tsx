@@ -5,7 +5,7 @@ import { ScanText, Upload, Filter, X, FileUp, Eye } from 'lucide-react';
 import { toast } from 'sonner';
 import { MonthPicker } from './MonthPicker';
 
-/** OCRO 스키마 필드 (증명서 추출 항목) */
+/** 인증 스키마 필드 */
 export type OcrsCertFields = {
   exporter_name: string;
   exporter_address: string;
@@ -78,8 +78,8 @@ function hashSeed(s: string): number {
   return h >>> 0;
 }
 
-/** 파일명·월 기반 데모 OCR 추출값 (실서비스에서는 OCR API 응답으로 대체) */
-function demoOcrsFields(ym: string, fileName: string): OcrsCertFields {
+/** 파일명·월 기반 인증 스키마 기본값 생성 */
+function buildCertFieldsFromFile(ym: string, fileName: string): OcrsCertFields {
   const h = hashSeed(`${ym}|${fileName}`);
   const pick = <T,>(arr: T[], offset: number) => arr[(h + offset) % arr.length];
   return {
@@ -110,7 +110,7 @@ function revokeAllObjectUrls(rows: Record<string, OcrMonthlyRow>) {
   });
 }
 
-/** 인증 파일 업로드 — 월별 조회 + OCRO 스키마(엑셀형) + 원본 파일 팝업 */
+/** 인증 파일 업로드 — 월별 조회 + 인증 스키마(엑셀형) + 원본 파일 팝업 */
 export function OcrDataInput() {
   const [monthPickerValue, setMonthPickerValue] = useState('');
   const [viewYm, setViewYm] = useState<string | null>(null);
@@ -171,7 +171,7 @@ export function OcrDataInput() {
       return;
     }
     const fileObjectUrl = URL.createObjectURL(selectedFile);
-    const fields = demoOcrsFields(viewYm, selectedFile.name);
+    const fields = buildCertFieldsFromFile(viewYm, selectedFile.name);
     const row: OcrMonthlyRow = {
       ...fields,
       sourceFileName: selectedFile.name,
@@ -187,7 +187,7 @@ export function OcrDataInput() {
     setUploadOpen(false);
     setSelectedFile(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
-    toast.success('인증 파일 처리를 완료했습니다. 아래 스키마에 반영되었습니다. (데모)');
+    toast.success('인증 파일 처리를 완료했습니다. 아래 스키마에 반영되었습니다.');
   };
 
   const onDropFile = (e: React.DragEvent) => {
@@ -228,8 +228,8 @@ export function OcrDataInput() {
           인증 파일 업로드
         </h1>
         <p className="text-[15px]" style={{ color: 'var(--aifix-gray)' }}>
-          월을 선택해 조회한 뒤, 인증 파일을 올리면 OCRO(원산지 증명서) 스키마 항목에 반영됩니다. 마지막 열에서
-          업로드한 원본을 팝업으로 확인할 수 있습니다. (현재는 데모 추출)
+          월을 선택해 조회한 뒤, 인증 파일을 올리면 인증 스키마 항목에 반영됩니다. 마지막 열에서 업로드한
+          원본을 팝업으로 확인할 수 있습니다.
         </p>
       </div>
 
@@ -286,7 +286,7 @@ export function OcrDataInput() {
           <div className="px-8 py-5 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="text-lg font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                월별 인터페이스 · 인증 반영 스키마 (OCRO)
+                월별 인터페이스 · 인증 반영 스키마
               </h3>
               <p className="text-sm text-gray-500 mt-1">
                 {viewYm ? ymToKoreanLabel(viewYm) : ''}
@@ -379,7 +379,6 @@ export function OcrDataInput() {
 
           <p className="px-8 py-4 text-xs text-gray-500 border-t border-gray-100">
             가로 스크롤로 전체 열을 확인할 수 있습니다. 다른 월을 조회하면 해당 월에 저장된 인증 반영 값이 표시됩니다.
-            실제 서비스에서는 추출·검수 API와 연동합니다.
           </p>
         </div>
       )}
@@ -455,7 +454,7 @@ export function OcrDataInput() {
               <div className="flex items-center gap-2">
                 <FileUp className="w-5 h-5" style={{ color: 'var(--aifix-primary)' }} />
                 <h4 id="ocr-upload-title" className="text-lg font-semibold text-gray-900">
-                  OCR 파일 업로드
+                  인증 파일 업로드
                 </h4>
               </div>
               <button

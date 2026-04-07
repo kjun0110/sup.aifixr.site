@@ -88,10 +88,36 @@ const ENERGY_TYPE_BASE_OPTIONS = [
   '스팀(열병합발전)',
   '액화석유가스(LPG)',
   '전기',
+  '산업용 전력',
   '중유',
   '천연가스',
+  'LNG',
   '휘발유',
 ] as const;
+
+function normalizeEnergyTypeForUi(raw: unknown): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  const key = s.toLowerCase().replace(/\s+/g, '');
+  const map: Record<string, string> = {
+    electricity: '전기',
+    steam_chp: '스팀(열병합발전)',
+    natural_gas: '천연가스',
+    industrial_water: '공업용수',
+    tap_water: '상수',
+    diesel: '경유',
+    kerosene: '등유',
+    anthracite: '무연탄',
+    bunker_c: '벙커C유',
+    coal: '석탄',
+    lpg: '액화석유가스(LPG)',
+    heavy_oil: '중유',
+    gasoline: '휘발유',
+    lng: '천연가스',
+    '산업용전력': '전기',
+  };
+  return map[key] ?? s;
+}
 
 /** 에너지 정보 탭 — 에너지 사용량 단위 후보 */
 const ENERGY_UNIT_BASE_OPTIONS = ['kg', 'kWh', 'MJ', 'GJ', 'm³'] as const;
@@ -1088,6 +1114,8 @@ export function SupplierDetail() {
     "overwrite",
   );
   const [supImportBusy, setSupImportBusy] = useState(false);
+  const [supExcelDragOver, setSupExcelDragOver] = useState(false);
+  const [supExcelSelectedFileName, setSupExcelSelectedFileName] = useState("");
   const supExcelFileInputRef = useRef<HTMLInputElement | null>(null);
   /** 이상치(노란) 1차 저장 후 2차 저장 시 `confirm_outlier_ack: true` */
   const supSaveConfirmOutlierRef = useRef(false);
@@ -1126,8 +1154,8 @@ export function SupplierDetail() {
   // 탭 선택 엑셀 다운로드용(세부탭별 체크박스)
   const ALL_DETAIL_TAB_IDS = [
     'company-info',
-    'contacts',
     'facilities',
+    'contacts',
     'products',
     'materials',
     'energy',
@@ -1392,6 +1420,7 @@ export function SupplierDetail() {
       (() => {
         const rows = (s.energy ?? []).map((r: Record<string, unknown>) => ({
           ...r,
+          energyType: normalizeEnergyTypeForUi(r.energyType ?? r.energy_type),
           _rowId: (r._rowId as string) ?? newRowId(),
         }));
         return rows.length > 0 ? rows : [EMPTY_ENERGY_ROW()];
@@ -1502,8 +1531,8 @@ export function SupplierDetail() {
 
   const tabs = [
     { id: "company-info", label: "기업 기본정보" },
-    { id: "contacts", label: "담당자 정보" },
     { id: "facilities", label: "사업장 정보" },
+    { id: "contacts", label: "담당자 정보" },
     { id: "products", label: "생산(납품) 제품 정보" },
     { id: "materials", label: "자재 정보" },
     { id: "energy", label: "에너지 정보" },
@@ -1656,7 +1685,7 @@ export function SupplierDetail() {
       ...EMPTY_ENERGY_ROW(),
       _rowId: newRowId(),
       productName: e.detail_product_name ?? "",
-      energyType: e.energy_type ?? "",
+      energyType: normalizeEnergyTypeForUi(e.energy_type),
       energyUsage: e.energy_usage ?? "",
       energyUnit: e.energy_unit ?? "",
       emissionFactor: e.energy_emission_factor ?? "",
@@ -1669,6 +1698,7 @@ export function SupplierDetail() {
       name: pr.detail_product_name ?? "",
       quantity: pr.production_qty ?? "",
       unit: pr.production_qty_unit ?? "",
+      standardWeight: pr.product_unit_capacity_kg ?? "",
       defectiveQuantity: pr.defective_qty ?? "",
       wasteQuantity: pr.waste_qty ?? "",
       wasteQuantityUnit: pr.waste_qty_unit ?? "",
@@ -1755,11 +1785,32 @@ export function SupplierDetail() {
       );
       setShowSupExcelUploadModal(false);
       if (input) input.value = "";
+      setSupExcelSelectedFileName("");
+      setSupExcelDragOver(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "엑셀 미리보기에 실패했습니다.");
     } finally {
       setSupImportBusy(false);
     }
+  };
+
+  const handleSupExcelDrop = (e: React.DragEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setSupExcelDragOver(false);
+    const dropped = e.dataTransfer?.files?.[0];
+    const input = supExcelFileInputRef.current;
+    if (!dropped || !input) return;
+    const isExcel =
+      dropped.name.toLowerCase().endsWith(".xlsx") || dropped.name.toLowerCase().endsWith(".xlsm");
+    if (!isExcel) {
+      toast.error("xlsx/xlsm 파일만 업로드할 수 있습니다.");
+      return;
+    }
+    const dt = new DataTransfer();
+    dt.items.add(dropped);
+    input.files = dt.files;
+    setSupExcelSelectedFileName(dropped.name);
   };
 
   const handleSaveComplete = async () => {
@@ -1832,7 +1883,7 @@ export function SupplierDetail() {
         )
         .map((r: Record<string, unknown>) => ({
           product_name: String(r.productName ?? "").trim(),
-          energy_type: String(r.energyType ?? "").trim(),
+          energy_type: normalizeEnergyTypeForUi(r.energyType),
           energy_usage: String(r.energyUsage ?? "").trim(),
           energy_unit: String(r.energyUnit ?? "").trim(),
           energy_emission_factor: String(r.emissionFactor ?? "").trim(),
@@ -3688,19 +3739,47 @@ export function SupplierDetail() {
                   ref={supExcelFileInputRef}
                   type="file"
                   accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  onChange={() => {
+                    setSupExcelSelectedFileName(supExcelFileInputRef.current?.files?.[0]?.name ?? "");
+                  }}
                   className="sr-only"
                   aria-hidden
                 />
                 <button
                   type="button"
                   onClick={() => supExcelFileInputRef.current?.click()}
-                  className="w-full cursor-pointer rounded-lg border-2 border-dashed border-gray-300 p-8 text-center transition-colors hover:border-[#5B3BFA]"
+                  onDragEnter={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSupExcelDragOver(true);
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSupExcelDragOver(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSupExcelDragOver(false);
+                  }}
+                  onDrop={handleSupExcelDrop}
+                  className={`w-full cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
+                    supExcelDragOver
+                      ? "border-[#5B3BFA] bg-purple-50/50"
+                      : "border-gray-300 hover:border-[#5B3BFA]"
+                  }`}
                 >
                   <Upload className="mx-auto mb-4 h-12 w-12 text-gray-400" />
                   <p className="mb-2 font-medium text-gray-700">파일을 드래그하거나 클릭하여 선택</p>
                   <p className="text-sm text-gray-500">
                     xlsx 파일 (다운로드한 tier0/export와 동일 구조 · 협력사 「엑셀 다운로드」와 동일)
                   </p>
+                  {supExcelSelectedFileName ? (
+                    <p className="mt-3 text-xs font-medium text-[#5B3BFA]">
+                      선택됨: {supExcelSelectedFileName}
+                    </p>
+                  ) : null}
                 </button>
                 <div className="mt-6 space-y-3">
                   <label className="flex cursor-pointer items-center gap-2">
@@ -3733,6 +3812,8 @@ export function SupplierDetail() {
                   onClick={() => {
                     setShowSupExcelUploadModal(false);
                     if (supExcelFileInputRef.current) supExcelFileInputRef.current.value = "";
+                    setSupExcelSelectedFileName("");
+                    setSupExcelDragOver(false);
                   }}
                   className="rounded-lg border border-gray-300 px-5 py-2.5 transition-colors hover:bg-gray-50"
                 >
@@ -3962,8 +4043,8 @@ export function SupplierDetail() {
                 >
                   <option value="">선택해주세요</option>
                   <option value="company-info">기업 기본정보</option>
-                  <option value="contacts">담당자 정보</option>
                   <option value="facilities">사업장 정보</option>
+                  <option value="contacts">담당자 정보</option>
                   <option value="products">생산(납품) 제품 정보</option>
                   <option value="materials">자재 정보</option>
                   <option value="energy">에너지 정보</option>
