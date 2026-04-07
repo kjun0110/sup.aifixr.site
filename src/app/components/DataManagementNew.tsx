@@ -42,6 +42,8 @@ type DataManagementNewProps = {
   tier: "tier1" | "tier2" | "tier3";
   /** 실제 프로젝트(real-*)일 때만 전달 — 공급망 트리 API(루트=내 협력사) */
   linkedProject?: DataMgmtLinkedProject | null;
+  /** 화면 상단 프로젝트 제목 등 — 납품 제품명 미기입 시 엑셀 파일명에 사용 */
+  linkedProjectExportLabel?: string | null;
 };
 
 /** 조회 기간 기본 라벨: 캘린더 기준 전월만 (1월이면 작년 12월) */
@@ -135,6 +137,7 @@ function mapSupTreeToSupplierNode(
 export function DataManagementNew({
   tier,
   linkedProject = null,
+  linkedProjectExportLabel = null,
 }: DataManagementNewProps) {
   const params = useParams();
   const projectId = typeof params.projectId === 'string' ? params.projectId : params.projectId?.[0] ?? 'p1';
@@ -810,8 +813,26 @@ export function DataManagementNew({
                 // supplierId를 행별 id로 넘겨서 상세 화면에서 회사명이 올바르게 보이도록 합니다.
                 const supplierKey = supplier.isOwn ? "own" : supplier.id;
 
+                const ymNav = periodToYmKorean(period);
+                const dmQuery =
+                  linkedProject && ymNav
+                    ? (() => {
+                        const [ys, ms] = ymNav.split("-");
+                        const mNum = parseInt(ms, 10);
+                        const v = linkedProject.productVariantId;
+                        const label =
+                          linkedProjectExportLabel != null &&
+                          String(linkedProjectExportLabel).trim() !== ""
+                            ? `&dmExportLabel=${encodeURIComponent(String(linkedProjectExportLabel).trim())}`
+                            : "";
+                        return `&dmProductId=${linkedProject.productId}&dmSupplierId=${linkedProject.supplierId}&dmYear=${ys}&dmMonth=${mNum}${
+                          v != null && v >= 1 ? `&dmVariantId=${v}` : ""
+                        }${label}`;
+                      })()
+                    : "";
+
                 router.push(
-                  `/projects/${projectId}/suppliers/${supplierKey}?backTab=data-mgmt&supplierName=${encodeURIComponent(supplier.name)}&supplierCountry=${encodeURIComponent(supplier.country)}&supplierType=${encodeURIComponent(supplier.type)}&supplierVolume=${encodeURIComponent(supplier.volume)}&supplierStatus=${encodeURIComponent(supplier.dataStatus)}&supplierPcfStatus=${encodeURIComponent(supplier.pcfStatus)}`
+                  `/projects/${projectId}/suppliers/${supplierKey}?backTab=data-mgmt&supplierName=${encodeURIComponent(supplier.name)}&supplierCountry=${encodeURIComponent(supplier.country)}&supplierType=${encodeURIComponent(supplier.type)}&supplierVolume=${encodeURIComponent(supplier.volume)}&supplierStatus=${encodeURIComponent(supplier.dataStatus)}&supplierPcfStatus=${encodeURIComponent(supplier.pcfStatus)}${dmQuery}`,
                 );
               }}
               className="flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-200 hover:bg-gray-100"

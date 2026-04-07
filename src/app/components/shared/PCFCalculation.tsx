@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { toast } from "sonner";
+import { usePathname, useSearchParams } from "next/navigation";
 import { 
   Play,
   RefreshCw,
@@ -19,6 +20,7 @@ import {
   Activity
 } from "lucide-react";
 import { MonthPicker } from "../MonthPicker";
+import { postSupPcfRunExecute, postSupPcfTransferShare } from "@/lib/api/pcf";
 
 type TierType = "tier1" | "tier2" | "tier3";
 type ReadinessStatus = "complete" | "partial" | "incomplete";
@@ -96,6 +98,8 @@ function defaultPreviousMonthKorean(): string {
 }
 
 export function PCFCalculation({ tier }: PCFCalculationProps) {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [isTransmitted, setIsTransmitted] = useState(false);
   const [lastRun, setLastRun] = useState<'none' | 'partial' | 'final'>('none');
   const [selectedPeriod, setSelectedPeriod] = useState(defaultPreviousMonthKorean);
@@ -109,6 +113,38 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
   const upperCompanyName = tier === "tier1" ? "원청사 A" : tier === "tier2" ? "상위 1차 협력사" : "상위 2차 협력사";
 
   const ym = periodToYm(selectedPeriod);
+  const runContext = useMemo(() => {
+    const pickInt = (...keys: string[]): number | null => {
+      for (const k of keys) {
+        const v = searchParams.get(k);
+        if (!v) continue;
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return null;
+    };
+    const projectFromPath = (() => {
+      const m = /\/projects\/real-(\d+)/i.exec(pathname ?? "");
+      if (!m) return null;
+      const n = parseInt(m[1], 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })();
+    const projectId = pickInt("projectId", "dmProjectId") ?? projectFromPath;
+    const productId = pickInt("productId", "dmProductId");
+    const productVariantId = pickInt("productVariantId", "dmProductVariantId");
+    if (!projectId || !productId || !productVariantId || !ym) return null;
+    const [ys, ms] = ym.split("-");
+    const reportingYear = parseInt(ys, 10);
+    const reportingMonth = parseInt(ms, 10);
+    if (!Number.isFinite(reportingYear) || !Number.isFinite(reportingMonth)) return null;
+    return {
+      project_id: projectId,
+      product_id: productId,
+      product_variant_id: productVariantId,
+      reporting_year: reportingYear,
+      reporting_month: reportingMonth,
+    };
+  }, [pathname, searchParams, ym]);
 
   useEffect(() => {
     if (!ym) {
@@ -732,36 +768,63 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
   const hasWarning =
     readinessStatus === "incomplete" || (readinessStatus === "partial" && hasDownstream);
 
-  const handlePartialCalculate = () => {
+  const handlePartialCalculate = async () => {
     if (!ym || !canPartialCalculate) {
       toast.error("부분산정 조건이 충족되지 않았습니다.");
       return;
     }
-    writeSupMonthRunState(tier, ym, { partial: true, final: false, transmitted: false });
-    setLastRun("partial");
-    setIsTransmitted(false);
-    toast.success("부분산정을 실행합니다 (자사 데이터만 반영)");
+    try {
+      if (runContext) {
+        await postSupPcfRunExecute({
+          ...runContext,
+          calculation_mode: "partial",
+        });
+      }
+      writeSupMonthRunState(tier, ym, { partial: true, final: false, transmitted: false });
+      setLastRun("partial");
+      setIsTransmitted(false);
+      toast.success(runContext ? "부분산정을 실행했습니다." : "부분산정을 실행합니다 (데모 모드)");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "부분산정 실행에 실패했습니다.");
+    }
   };
 
-  const handleFinalCalculate = () => {
+  const handleFinalCalculate = async () => {
     if (!ym || !canFinalCalculate) {
       toast.error("최종산정 조건이 충족되지 않았습니다.");
       return;
     }
-    writeSupMonthRunState(tier, ym, { partial: true, final: true, transmitted: false });
-    setLastRun("final");
-    setIsTransmitted(false);
-    toast.success("최종 PCF 산정을 실행합니다 (하위 데이터 포함)");
+    try {
+      if (runContext) {
+        await postSupPcfRunExecute({
+          ...runContext,
+          calculation_mode: "final",
+        });
+      }
+      writeSupMonthRunState(tier, ym, { partial: true, final: true, transmitted: false });
+      setLastRun("final");
+      setIsTransmitted(false);
+      toast.success(runContext ? "최종 PCF 산정을 실행했습니다." : "최종 PCF 산정을 실행합니다 (데모 모드)");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "최종 PCF 산정 실행에 실패했습니다.");
+    }
   };
 
-  const handleTransmit = () => {
+  const handleTransmit = async () => {
     if (!ym || !canTransmit) {
       toast.error("최종 산정 완료 후에만 상위로 전송할 수 있습니다.");
       return;
     }
-    writeSupMonthRunState(tier, ym, { transmitted: true });
-    setIsTransmitted(true);
-    toast.success(`${upperCompanyName}로 PCF 결과를 전송했습니다 (추후 API 연동)`);
+    try {
+      if (runContext) {
+        await postSupPcfTransferShare(runContext);
+      }
+      writeSupMonthRunState(tier, ym, { transmitted: true });
+      setIsTransmitted(true);
+      toast.success(runContext ? `${upperCompanyName}로 PCF 결과를 전송했습니다.` : `${upperCompanyName}로 PCF 결과를 전송했습니다 (데모 모드)`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "PCF 결과 전송에 실패했습니다.");
+    }
   };
 
   if (selectedResult) {

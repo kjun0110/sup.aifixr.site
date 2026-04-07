@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, apiFetchBlob } from "./client";
 import { API_PREFIX } from "./paths";
 
 export const DATA_MGMT_BASE = API_PREFIX.DATA_MGMT;
@@ -67,4 +67,182 @@ export async function postSupDataRequest(
     `${DATA_MGMT_BASE}/sup/data-requests`,
     { method: "POST", json: body },
   );
+}
+
+/** UI 세부탭 id → Tier0 시트 id (원청 export.xlsx 와 동일) */
+export const SUP_DETAIL_TAB_TO_SHEET_ID: Record<string, number> = {
+  "company-info": 8,
+  contacts: 2,
+  facilities: 1,
+  products: 7,
+  materials: 5,
+  energy: 6,
+  transport: 9,
+};
+
+export type SupMonthlyExportXlsxParams = {
+  projectId: number;
+  productId: number;
+  supplierId: number;
+  reportingYear: number;
+  reportingMonth: number;
+  productVariantId?: number | null;
+  /** 쉼표 구분 시트 ID (예 "8,1,7") */
+  sheets: string;
+  /** 납품 행이 비었을 때 파일명용 — 데이터 관리 헤더 프로젝트명 등 */
+  filenameHint?: string | null;
+};
+
+/** 협력사 월별 데이터 — Tier0 포맷 XLSX */
+export async function getSupDataMgmtMonthlyExportXlsx(
+  p: SupMonthlyExportXlsxParams,
+): Promise<{ blob: Blob; filename: string | null }> {
+  const q = new URLSearchParams();
+  q.set("sheets", p.sheets);
+  if (p.productVariantId != null && p.productVariantId >= 1) {
+    q.set("product_variant_id", String(p.productVariantId));
+  }
+  const hint = (p.filenameHint ?? "").trim();
+  if (hint) {
+    q.set("filename_hint", hint);
+  }
+  const path = `${DATA_MGMT_BASE}/sup/projects/${p.projectId}/products/${p.productId}/suppliers/${p.supplierId}/months/${p.reportingYear}/${p.reportingMonth}/export.xlsx?${q.toString()}`;
+  return apiFetchBlob(path, { method: "GET" });
+}
+
+/** `PUT .../save` — SupSaveDeliveredAndActivitiesRequest */
+export type SupSaveDeliveredAndActivitiesBody = {
+  product_variant_id: number;
+  delivered?: {
+    delivered_product_name?: string | null;
+    mineral_origin?: string | null;
+    /** YYYY-MM-DD */
+    delivery_date?: string | null;
+    delivery_qty?: string | null;
+    base_unit?: string | null;
+    product_unit_capacity_kg?: string | null;
+    defective_qty?: string | null;
+    waste_qty?: string | null;
+    waste_qty_unit?: string | null;
+    waste_emission_factor?: string | null;
+    waste_emission_factor_unit?: string | null;
+    sup_workplace_id?: number | null;
+    sup_contact_id?: number | null;
+  } | null;
+  material_rows: Record<string, unknown>[];
+  energy_rows: Record<string, unknown>[];
+  transport_rows: Record<string, unknown>[];
+  confirm_outlier_ack?: boolean;
+};
+
+export type SupSaveDeliveredAndActivitiesResponse = {
+  saved: boolean;
+  red_flags: { message?: string; code?: string; field?: string }[];
+  yellow_warnings: unknown[];
+  outlier_review_phase: string;
+  message: string;
+};
+
+export async function putSupDataMgmtMonthlySave(p: {
+  projectId: number;
+  productId: number;
+  supplierId: number;
+  reportingYear: number;
+  reportingMonth: number;
+  body: SupSaveDeliveredAndActivitiesBody;
+}): Promise<SupSaveDeliveredAndActivitiesResponse> {
+  const path = `${DATA_MGMT_BASE}/sup/projects/${p.projectId}/products/${p.productId}/suppliers/${p.supplierId}/months/${p.reportingYear}/${p.reportingMonth}/save`;
+  return apiFetch<SupSaveDeliveredAndActivitiesResponse>(path, {
+    method: "PUT",
+    json: p.body,
+  });
+}
+
+/** Tier0/협력사 export.xlsx — `import-preview` 응답 (snake_case) */
+export type SupImportPreviewWorkplaceContact = {
+  site_name?: string;
+  department?: string;
+  position?: string;
+  job_title?: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+};
+
+export type SupImportPreviewMaterial = {
+  detail_product_name?: string;
+  process_name?: string;
+  input_material_name?: string;
+  input_amount?: string;
+  input_amount_unit?: string;
+  material_emission_factor?: string;
+  material_emission_factor_unit?: string;
+  mineral_type?: string;
+  mineral_amount?: string;
+  mineral_amount_unit?: string;
+  mineral_origin?: string;
+  mineral_emission_factor?: string;
+  mineral_emission_factor_unit?: string;
+};
+
+export type SupImportPreviewEnergy = {
+  detail_product_name?: string;
+  process_name?: string;
+  energy_type?: string;
+  energy_usage?: string;
+  energy_unit?: string;
+  energy_emission_factor?: string;
+  energy_emission_factor_unit?: string;
+};
+
+export type SupImportPreviewProduction = {
+  detail_product_name?: string;
+  site_name?: string;
+  production_qty?: string;
+  production_qty_unit?: string;
+  defective_qty?: string;
+  waste_qty?: string;
+  waste_qty_unit?: string;
+  waste_emission_factor?: string;
+  waste_emission_factor_unit?: string;
+};
+
+export type SupImportPreviewTransport = {
+  detail_product_name?: string;
+  origin_country?: string;
+  origin_address_detail?: string;
+  destination_country?: string;
+  destination_address_detail?: string;
+  transport_mode?: string;
+  transport_fuel_type?: string;
+  transport_fuel_qty?: string;
+  transport_fuel_qty_unit?: string;
+  transport_qty?: string;
+  transport_qty_unit?: string;
+  transport_emission_factor?: string;
+  transport_emission_factor_unit?: string;
+};
+
+export type SupImportPreviewResponse = {
+  warnings?: string[];
+  workplace_contacts: SupImportPreviewWorkplaceContact[];
+  materials: SupImportPreviewMaterial[];
+  energy_rows: SupImportPreviewEnergy[];
+  production_rows: SupImportPreviewProduction[];
+  transport_rows?: SupImportPreviewTransport[];
+};
+
+/** 월별 엑셀 미리보기 — DB 미반영(화면만). 원청 tier0/import-preview 와 동일 파서. */
+export async function postSupDataMgmtImportPreview(p: {
+  projectId: number;
+  productId: number;
+  supplierId: number;
+  reportingYear: number;
+  reportingMonth: number;
+  file: File;
+}): Promise<SupImportPreviewResponse> {
+  const fd = new FormData();
+  fd.append("file", p.file);
+  const path = `${DATA_MGMT_BASE}/sup/projects/${p.projectId}/products/${p.productId}/suppliers/${p.supplierId}/months/${p.reportingYear}/${p.reportingMonth}/import-preview`;
+  return apiFetch<SupImportPreviewResponse>(path, { method: "POST", body: fd });
 }

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useSearchParams } from "next/navigation";
-import type { ChangeEvent, InputHTMLAttributes, ReactNode } from "react";
+import type { InputHTMLAttributes, ReactNode } from "react";
 import { 
   ArrowLeft, 
   Download, 
@@ -29,6 +29,13 @@ import {
   restoreSupSessionFromCookie,
   AIFIXR_SESSION_UPDATED_EVENT,
 } from "@/lib/api/client";
+import {
+  getSupDataMgmtMonthlyExportXlsx,
+  postSupDataMgmtImportPreview,
+  putSupDataMgmtMonthlySave,
+  SUP_DETAIL_TAB_TO_SHEET_ID,
+  type SupImportPreviewResponse,
+} from "@/lib/api/data-mgmt";
 import {
   getMySupplierProfile,
   type SupplierProfileMe,
@@ -102,8 +109,20 @@ const DELIVERY_AND_INPUT_UNIT_BASE_OPTIONS = [
   'EA',
 ] as const;
 
-/** 운송 물량 — Climatiq 화물 무게(톤)만; 단위 비움은 '선택'으로 두고 수량만 톤으로 해석 */
-const TRANSPORT_CARGO_WEIGHT_UNIT_BASE_OPTIONS = ['kg', 'g', 'ton', 't'] as const;
+/** 운송수단·연료·물량 단위 — 원청 Tier0 운송 시트와 동일 후보 */
+const TRANSPORT_MODE_BASE_OPTIONS = ['육운', '해운', '항공', '철도'] as const;
+const TRANSPORT_FUEL_TYPE_BASE_OPTIONS = [
+  '경유',
+  '휘발유',
+  '중유',
+  'LNG',
+  'LPG',
+  '전기',
+  '수소',
+] as const;
+const TRANSPORT_FUEL_QTY_UNIT_BASE_OPTIONS = ['kg', 'ton'] as const;
+/** 운송 물량 단위 (원청 HEADERS_TRANSPORT · Tier0와 동일) */
+const TRANSPORT_QTY_UNIT_BASE_OPTIONS = ['kg', 'ton', 'ton.km', 'kg.km'] as const;
 
 const EMPTY_PRODUCT_ROW = () => ({
   _rowId: newRowId(),
@@ -112,6 +131,7 @@ const EMPTY_PRODUCT_ROW = () => ({
   quantity: '',
   unit: '',
   standardWeight: '',
+  defectiveQuantity: '',
   unitWeight: '',
   deliveryDate: '',
   hsCode: '',
@@ -123,6 +143,14 @@ const EMPTY_PRODUCT_ROW = () => ({
   wasteQuantityUnit: '',
   wasteEmissionFactor: '',
   wasteEmissionFactorUnit: '',
+});
+
+const EMPTY_CONTACT_ROW = () => ({
+  department: '',
+  position: '',
+  name: '',
+  email: '',
+  phone: '',
 });
 
 const EMPTY_PRODUCTION_ROW = () => ({
@@ -181,11 +209,82 @@ const EMPTY_TRANSPORT_ROW = () => ({
   destinationCountry: '',
   destinationAddress: '',
   transportMethod: '',
+  transportFuelType: '',
+  transportFuelQty: '',
+  transportFuelQtyUnit: '',
   transportAmount: '',
   transportAmountUnit: '',
   emissionFactor: '',
   emissionFactorUnit: '',
 });
+
+/**
+ * API·엑셀(snake_case)과 화면(camelCase) 병행 지원. 원청 export 시트(운송정보) 열과 동일 의미.
+ */
+function normalizeTransportRowFromSource(
+  r: Record<string, unknown>,
+  preserveRowId?: string | null,
+): Record<string, unknown> {
+  const str = (v: unknown) => (v == null ? '' : String(v));
+  const rowId =
+    (typeof preserveRowId === 'string' && preserveRowId) ||
+    (typeof r._rowId === 'string' && r._rowId) ||
+    newRowId();
+  return {
+    _rowId: rowId,
+    productName: str(r.productName) || str(r.product_name),
+    originCountry: str(r.originCountry) || str(r.origin_country),
+    originAddress:
+      str(r.originAddress) || str(r.origin_address_detail) || str(r.origin),
+    destinationCountry: str(r.destinationCountry) || str(r.destination_country),
+    destinationAddress:
+      str(r.destinationAddress) ||
+      str(r.destination_address_detail) ||
+      str(r.destination),
+    transportMethod: str(r.transportMethod) || str(r.transport_mode),
+    transportFuelType: str(r.transportFuelType) || str(r.transport_fuel_type),
+    transportFuelQty: str(r.transportFuelQty) || str(r.transport_fuel_qty),
+    transportFuelQtyUnit:
+      str(r.transportFuelQtyUnit) || str(r.transport_fuel_qty_unit),
+    transportAmount: str(r.transportAmount) || str(r.transport_qty),
+    transportAmountUnit: str(r.transportAmountUnit) || str(r.transport_qty_unit),
+    emissionFactor: str(r.emissionFactor) || str(r.transport_emission_factor),
+    emissionFactorUnit:
+      str(r.emissionFactorUnit) || str(r.transport_emission_factor_unit),
+  };
+}
+
+/** 백엔드 `SupTransportMode` — UI 한글·영문 코드 모두 허용 */
+const SUP_TRANSPORT_MODE_KO_TO_API: Record<string, "land" | "sea" | "air" | "rail"> = {
+  육운: "land",
+  해운: "sea",
+  항공: "air",
+  철도: "rail",
+};
+
+function supTransportModeToApi(raw: string): string | undefined {
+  const t = raw.trim();
+  if (!t) return undefined;
+  const lower = t.toLowerCase();
+  if (["land", "sea", "air", "rail"].includes(lower)) return lower;
+  return SUP_TRANSPORT_MODE_KO_TO_API[t] ?? undefined;
+}
+
+function supIso3166Alpha2(v: unknown): string | undefined {
+  const s = String(v ?? "")
+    .trim()
+    .toUpperCase();
+  return /^[A-Z]{2}$/.test(s) ? s : undefined;
+}
+
+function parseDeliveryDateIso(raw: unknown): string | undefined {
+  const s = String(raw ?? "").trim();
+  if (!s) return undefined;
+  const normalized = s.replace(/\./g, "-").replace(/\//g, "-");
+  const d = new Date(normalized);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toISOString().slice(0, 10);
+}
 
 /** 자재·에너지·운송 탭 제품명 컬럼 안내 (계약 품목 + 생산제품 탭 연동) */
 const PRODUCT_NAME_DROPDOWN_HINT =
@@ -984,9 +1083,15 @@ export function SupplierDetail() {
     rmiSmelter: '',
     feoc: '',
   });
-  // Excel upload (mock) - 탭별로 업로드 버튼을 눌렀을 때 어떤 탭인지 식별
-  const excelFileInputRef = useRef<HTMLInputElement | null>(null);
-  const [excelUploadTabId, setExcelUploadTabId] = useState<string | null>(null);
+  const [showSupExcelUploadModal, setShowSupExcelUploadModal] = useState(false);
+  const [supExcelUploadMergeMode, setSupExcelUploadMergeMode] = useState<"overwrite" | "append">(
+    "overwrite",
+  );
+  const [supImportBusy, setSupImportBusy] = useState(false);
+  const supExcelFileInputRef = useRef<HTMLInputElement | null>(null);
+  /** 이상치(노란) 1차 저장 후 2차 저장 시 `confirm_outlier_ack: true` */
+  const supSaveConfirmOutlierRef = useRef(false);
+  const [supSaveBusy, setSupSaveBusy] = useState(false);
   const [editableProducts, setEditableProducts] = useState<any[]>([]);
   const [editableProduction, setEditableProduction] = useState<any[]>([]);
   const [editableContacts, setEditableContacts] = useState<any[]>([]);
@@ -1088,6 +1193,47 @@ export function SupplierDetail() {
     () => parseSupplierDetailProjectPk(projectId),
     [projectId],
   );
+
+  const resolveDmSaveContext = useCallback((): {
+    projectId: number;
+    productId: number;
+    supplierId: number;
+    productVariantId: number;
+    reportingYear: number;
+    reportingMonth: number;
+  } | null => {
+    if (supplierId !== "own" || projectPkForApi == null) return null;
+    const qPid = searchParams.get("dmProductId");
+    const qSid = searchParams.get("dmSupplierId");
+    const qVid = searchParams.get("dmVariantId");
+    const qY = searchParams.get("dmYear");
+    const qM = searchParams.get("dmMonth");
+    const productId =
+      qPid != null && qPid !== ""
+        ? parseInt(qPid, 10)
+        : (ownProjectDetailForCard?.product_id ?? NaN);
+    const supplierIdNum =
+      qSid != null && qSid !== ""
+        ? parseInt(qSid, 10)
+        : (ownProjectDetailForCard?.supplier_id ?? NaN);
+    const variantRaw =
+      qVid != null && qVid !== "" ? parseInt(qVid, 10) : ownProjectDetailForCard?.product_variant_id;
+    const productVariantId =
+      variantRaw != null && Number.isFinite(variantRaw) && variantRaw >= 1 ? variantRaw : NaN;
+    const reportingYear = qY != null && qY !== "" ? parseInt(qY, 10) : NaN;
+    const reportingMonth = qM != null && qM !== "" ? parseInt(qM, 10) : NaN;
+    if (!Number.isFinite(productId) || !Number.isFinite(supplierIdNum)) return null;
+    if (!Number.isFinite(productVariantId) || productVariantId < 1) return null;
+    if (!Number.isFinite(reportingYear) || !Number.isFinite(reportingMonth)) return null;
+    return {
+      projectId: projectPkForApi,
+      productId,
+      supplierId: supplierIdNum,
+      productVariantId,
+      reportingYear,
+      reportingMonth,
+    };
+  }, [supplierId, projectPkForApi, searchParams, ownProjectDetailForCard]);
 
   const loadContractDeliverableProductNames = useCallback(async () => {
     if (supplierId !== "own" || projectPkForApi == null) {
@@ -1253,10 +1399,9 @@ export function SupplierDetail() {
     );
     setEditableTransport(
       (() => {
-        const rows = (s.transport ?? []).map((r: Record<string, unknown>) => ({
-          ...r,
-          _rowId: (r._rowId as string) ?? newRowId(),
-        }));
+        const rows = (s.transport ?? []).map((r: Record<string, unknown>) =>
+          normalizeTransportRowFromSource(r, (r._rowId as string) ?? null),
+        );
         return rows.length > 0 ? rows : [EMPTY_TRANSPORT_ROW()];
       })(),
     );
@@ -1370,40 +1515,406 @@ export function SupplierDetail() {
     toast.success(`${tabLabel} 엑셀 다운로드 준비 (mock)`);
   };
 
-  const handleExcelDownloadSelectedTabs = (tabIds?: string[]) => {
-    if (supplierId !== 'own') return;
+  const handleExcelDownloadSelectedTabs = async (tabIds?: string[]) => {
+    if (supplierId !== "own") return;
     const selected = tabIds ?? selectedExcelDownloadTabs;
     if (selected.length === 0) {
-      toast.error('엑셀 다운로드에 포함할 세부탭을 1개 이상 선택해주세요.');
+      toast.error("엑셀 다운로드에 포함할 세부탭을 1개 이상 선택해주세요.");
       return;
     }
 
-    const labels = selected
-      .map((id) => tabs.find((t) => t.id === id)?.label ?? id)
-      .join(', ');
+    const sheetNums = Array.from(
+      new Set(
+        selected
+          .map((id) => SUP_DETAIL_TAB_TO_SHEET_ID[id])
+          .filter((n): n is number => typeof n === "number"),
+      ),
+    );
+    if (sheetNums.length === 0) {
+      toast.error("선택한 탭에 해당하는 시트가 없습니다.");
+      return;
+    }
 
-    toast.success(`선택 세부탭 엑셀 다운로드 (mock)\n시트: ${labels}`);
+    const qPid = searchParams.get("dmProductId");
+    const qSid = searchParams.get("dmSupplierId");
+    const qVid = searchParams.get("dmVariantId");
+    const qY = searchParams.get("dmYear");
+    const qM = searchParams.get("dmMonth");
+
+    const productId =
+      qPid != null && qPid !== ""
+        ? parseInt(qPid, 10)
+        : (ownProjectDetailForCard?.product_id ?? NaN);
+    const supplierIdNum =
+      qSid != null && qSid !== ""
+        ? parseInt(qSid, 10)
+        : (ownProjectDetailForCard?.supplier_id ?? NaN);
+    const variantRaw =
+      qVid != null && qVid !== "" ? parseInt(qVid, 10) : ownProjectDetailForCard?.product_variant_id;
+    const productVariantId =
+      variantRaw != null && Number.isFinite(variantRaw) && variantRaw >= 1 ? variantRaw : null;
+    const reportingYear = qY != null && qY !== "" ? parseInt(qY, 10) : NaN;
+    const reportingMonth = qM != null && qM !== "" ? parseInt(qM, 10) : NaN;
+
+    if (projectPkForApi == null) {
+      toast.error("프로젝트를 식별할 수 없습니다.");
+      return;
+    }
+    if (!Number.isFinite(productId) || !Number.isFinite(supplierIdNum)) {
+      toast.error("제품·협력사 정보가 없습니다. 데이터 관리에서 상세보기로 다시 들어와 주세요.");
+      return;
+    }
+    if (!Number.isFinite(reportingYear) || !Number.isFinite(reportingMonth)) {
+      toast.error("조회 기간(연·월)이 없습니다. 데이터 관리에서 기간을 선택한 뒤 상세보기로 들어와 주세요.");
+      return;
+    }
+
+    const exportLabel =
+      searchParams.get("dmExportLabel")?.trim() ||
+      ownProjectDetailForCard?.productName?.trim() ||
+      ownProjectDetailForCard?.name?.trim() ||
+      "";
+
+    const safeFilenameSegment = (raw: string, maxLen = 72): string => {
+      let s = raw.trim();
+      for (const ch of '\\/:*?"<>|') s = s.split(ch).join("_");
+      s = s.replace(/\s+/g, " ").trim();
+      if (s.length > maxLen) s = `${s.slice(0, maxLen - 3)}...`;
+      return s || "데이터";
+    };
+
+    try {
+      await restoreSupSessionFromCookie();
+      const { blob, filename } = await getSupDataMgmtMonthlyExportXlsx({
+        projectId: projectPkForApi,
+        productId,
+        supplierId: supplierIdNum,
+        reportingYear,
+        reportingMonth,
+        productVariantId,
+        sheets: sheetNums.join(","),
+        filenameHint: exportLabel || null,
+      });
+      const padM = String(reportingMonth).padStart(2, "0");
+      const fallbackName = exportLabel
+        ? `${reportingYear}-${padM}, ${safeFilenameSegment(exportLabel)} 데이터.xlsx`
+        : `${reportingYear}-${padM}, 데이터.xlsx`;
+      const downloadName = (filename && filename.trim()) || fallbackName;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = downloadName;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success("엑셀 파일을 저장했습니다.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "엑셀 다운로드에 실패했습니다.");
+    }
   };
 
-  const handleExcelUploadClick = (tabId: string) => {
-    setExcelUploadTabId(tabId);
-    excelFileInputRef.current?.click();
+  const handleExcelUploadClick = (_tabId: string) => {
+    if (supplierId !== "own") return;
+    setShowSupExcelUploadModal(true);
   };
 
-  const handleExcelFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !excelUploadTabId) return;
+  const applySupImportPreviewToState = (preview: SupImportPreviewResponse, mode: "overwrite" | "append") => {
+    if (preview.warnings?.length) {
+      toast.message(preview.warnings.join("\n"), { duration: 8000 });
+    }
 
-    const tabLabel = tabs.find((t) => t.id === excelUploadTabId)?.label ?? excelUploadTabId;
-    toast.success(`${tabLabel} 파일 업로드 완료: ${file.name} (mock)`);
+    const mappedContacts = (preview.workplace_contacts ?? []).map((c) => ({
+      department: c.department ?? "",
+      position: [c.position, c.job_title]
+        .filter((x) => (x ?? "").toString().trim())
+        .join(" / "),
+      name: c.name ?? "",
+      email: c.email ?? "",
+      phone: c.phone ?? "",
+    }));
 
-    // allow re-uploading same file
-    e.target.value = '';
-    setExcelUploadTabId(null);
+    const mappedMaterials = (preview.materials ?? []).map((m) => ({
+      ...EMPTY_MATERIAL_ROW(),
+      _rowId: newRowId(),
+      productName: m.detail_product_name ?? "",
+      inputMaterialName: m.input_material_name ?? "",
+      inputAmount: m.input_amount ?? "",
+      inputAmountUnit: m.input_amount_unit ?? "",
+      materialEmissionFactor: m.material_emission_factor ?? "",
+      materialEmissionFactorUnit: m.material_emission_factor_unit ?? "",
+      mineralType: m.mineral_type ?? "",
+      mineralAmount: m.mineral_amount ?? "",
+      mineralAmountUnit: m.mineral_amount_unit ?? "",
+      mineralOrigin: m.mineral_origin ?? "",
+      mineralEmissionFactor: m.mineral_emission_factor ?? "",
+      mineralEmissionFactorUnit: m.mineral_emission_factor_unit ?? "",
+    }));
+
+    const mappedEnergy = (preview.energy_rows ?? []).map((e) => ({
+      ...EMPTY_ENERGY_ROW(),
+      _rowId: newRowId(),
+      productName: e.detail_product_name ?? "",
+      energyType: e.energy_type ?? "",
+      energyUsage: e.energy_usage ?? "",
+      energyUnit: e.energy_unit ?? "",
+      emissionFactor: e.energy_emission_factor ?? "",
+      emissionFactorUnit: e.energy_emission_factor_unit ?? "",
+    }));
+
+    const mappedProducts = (preview.production_rows ?? []).map((pr) => ({
+      ...EMPTY_PRODUCT_ROW(),
+      _rowId: newRowId(),
+      name: pr.detail_product_name ?? "",
+      quantity: pr.production_qty ?? "",
+      unit: pr.production_qty_unit ?? "",
+      defectiveQuantity: pr.defective_qty ?? "",
+      wasteQuantity: pr.waste_qty ?? "",
+      wasteQuantityUnit: pr.waste_qty_unit ?? "",
+      wasteEmissionFactor: pr.waste_emission_factor ?? "",
+      wasteEmissionFactorUnit: pr.waste_emission_factor_unit ?? "",
+    }));
+
+    const mappedTransport = (preview.transport_rows ?? []).map((t) =>
+      normalizeTransportRowFromSource(
+        {
+          product_name: t.detail_product_name,
+          origin_country: t.origin_country,
+          origin_address_detail: t.origin_address_detail,
+          destination_country: t.destination_country,
+          destination_address_detail: t.destination_address_detail,
+          transport_mode: t.transport_mode,
+          transport_fuel_type: t.transport_fuel_type,
+          transport_fuel_qty: t.transport_fuel_qty,
+          transport_fuel_qty_unit: t.transport_fuel_qty_unit,
+          transport_qty: t.transport_qty,
+          transport_qty_unit: t.transport_qty_unit,
+          transport_emission_factor: t.transport_emission_factor,
+          transport_emission_factor_unit: t.transport_emission_factor_unit,
+        },
+        null,
+      ),
+    );
+
+    if (mode === "overwrite") {
+      setEditableContacts(
+        mappedContacts.length > 0 ? mappedContacts : [EMPTY_CONTACT_ROW()],
+      );
+      setEditableMaterials(mappedMaterials.length > 0 ? mappedMaterials : [EMPTY_MATERIAL_ROW()]);
+      setEditableEnergy(mappedEnergy.length > 0 ? mappedEnergy : [EMPTY_ENERGY_ROW()]);
+      setEditableProducts(mappedProducts.length > 0 ? mappedProducts : [EMPTY_PRODUCT_ROW()]);
+      setEditableTransport(mappedTransport.length > 0 ? mappedTransport : [EMPTY_TRANSPORT_ROW()]);
+    } else {
+      if (mappedContacts.length > 0) {
+        setEditableContacts((prev) => [...prev, ...mappedContacts]);
+      }
+      if (mappedMaterials.length > 0) {
+        setEditableMaterials((prev) => [...prev, ...mappedMaterials]);
+      }
+      if (mappedEnergy.length > 0) {
+        setEditableEnergy((prev) => [...prev, ...mappedEnergy]);
+      }
+      if (mappedProducts.length > 0) {
+        setEditableProducts((prev) => [...prev, ...mappedProducts]);
+      }
+      if (mappedTransport.length > 0) {
+        setEditableTransport((prev) => [...prev, ...mappedTransport]);
+      }
+    }
   };
 
-  const handleSaveComplete = () => {
-    toast.success('저장되었습니다');
+  const handleSupExcelUploadConfirm = async () => {
+    const input = supExcelFileInputRef.current;
+    const file = input?.files?.[0];
+    if (!file) {
+      toast.error("엑셀 파일을 선택해 주세요.");
+      return;
+    }
+    const ctx = resolveDmSaveContext();
+    if (!ctx) {
+      toast.error(
+        "업로드에 필요한 정보가 없습니다. 데이터 관리에서 연·월·세부제품이 포함된 상세 진입 링크로 다시 들어와 주세요.",
+      );
+      return;
+    }
+    setSupImportBusy(true);
+    try {
+      await restoreSupSessionFromCookie();
+      const preview = await postSupDataMgmtImportPreview({
+        projectId: ctx.projectId,
+        productId: ctx.productId,
+        supplierId: ctx.supplierId,
+        reportingYear: ctx.reportingYear,
+        reportingMonth: ctx.reportingMonth,
+        file,
+      });
+      applySupImportPreviewToState(preview, supExcelUploadMergeMode);
+      toast.success(
+        "엑셀 내용을 화면에 반영했습니다. 확인 후 「수정 완료」를 누르면 DB에 저장됩니다.",
+      );
+      setShowSupExcelUploadModal(false);
+      if (input) input.value = "";
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "엑셀 미리보기에 실패했습니다.");
+    } finally {
+      setSupImportBusy(false);
+    }
+  };
+
+  const handleSaveComplete = async () => {
+    if (supplierId !== "own") {
+      toast.info("하위 협력사 보기에서는 저장할 수 없습니다.");
+      return;
+    }
+    const ctx = resolveDmSaveContext();
+    if (!ctx) {
+      toast.error(
+        "저장에 필요한 정보가 없습니다. 데이터 관리에서 연·월·세부제품이 포함된 상세 진입 링크로 다시 들어와 주세요.",
+      );
+      return;
+    }
+    setSupSaveBusy(true);
+    try {
+      await restoreSupSessionFromCookie();
+      const firstProduct = editableProducts.find(
+        (p: Record<string, unknown>) =>
+          String(p.name ?? "").trim() || String(p.quantity ?? "").trim(),
+      );
+      const delivered =
+        firstProduct != null
+          ? {
+              delivered_product_name: String(firstProduct.name ?? "").trim() || null,
+              mineral_origin: String(firstProduct.origin ?? "").trim() || null,
+              delivery_date: parseDeliveryDateIso(firstProduct.deliveryDate) ?? null,
+              delivery_qty: String(firstProduct.quantity ?? "").trim() || null,
+              base_unit: String(firstProduct.unit ?? "").trim() || null,
+              product_unit_capacity_kg: String(firstProduct.standardWeight ?? "").trim() || null,
+              defective_qty: String(firstProduct.defectiveQuantity ?? "").trim() || null,
+              waste_qty: String(firstProduct.wasteQuantity ?? "").trim() || null,
+              waste_qty_unit: String(firstProduct.wasteQuantityUnit ?? "").trim() || null,
+              waste_emission_factor: String(firstProduct.wasteEmissionFactor ?? "").trim() || null,
+              waste_emission_factor_unit: String(firstProduct.wasteEmissionFactorUnit ?? "").trim() || null,
+            }
+          : null;
+      const hasDeliveredField =
+        delivered != null &&
+        Object.values(delivered).some((v) => v != null && String(v).trim() !== "");
+      const material_rows = editableMaterials
+        .filter((r: Record<string, unknown>) => {
+          return (
+            String(r.productName ?? "").trim() ||
+            String(r.inputMaterialName ?? "").trim() ||
+            String(r.inputAmount ?? "").trim() ||
+            String(r.mineralType ?? "").trim()
+          );
+        })
+        .map((r: Record<string, unknown>) => ({
+          product_name: String(r.productName ?? "").trim(),
+          input_material_name: String(r.inputMaterialName ?? "").trim(),
+          input_material_qty: String(r.inputAmount ?? "").trim(),
+          input_qty_unit: String(r.inputAmountUnit ?? "").trim(),
+          material_emission_factor: String(r.materialEmissionFactor ?? "").trim(),
+          material_emission_factor_unit: String(r.materialEmissionFactorUnit ?? "").trim(),
+          input_mineral_type: String(r.mineralType ?? "").trim(),
+          input_mineral_qty: String(r.mineralAmount ?? "").trim(),
+          input_mineral_qty_unit: String(r.mineralAmountUnit ?? "").trim(),
+          mineral_origin: String(r.mineralOrigin ?? "").trim(),
+          mineral_emission_factor: String(r.mineralEmissionFactor ?? "").trim(),
+          mineral_emission_factor_unit: String(r.mineralEmissionFactorUnit ?? "").trim(),
+        }));
+      const energy_rows = editableEnergy
+        .filter(
+          (r: Record<string, unknown>) =>
+            String(r.productName ?? "").trim() ||
+            String(r.energyType ?? "").trim() ||
+            String(r.energyUsage ?? "").trim(),
+        )
+        .map((r: Record<string, unknown>) => ({
+          product_name: String(r.productName ?? "").trim(),
+          energy_type: String(r.energyType ?? "").trim(),
+          energy_usage: String(r.energyUsage ?? "").trim(),
+          energy_unit: String(r.energyUnit ?? "").trim(),
+          energy_emission_factor: String(r.emissionFactor ?? "").trim(),
+          energy_emission_factor_unit: String(r.emissionFactorUnit ?? "").trim(),
+        }));
+      const transport_rows = editableTransport
+        .filter((r: Record<string, unknown>) => {
+          return (
+            String(r.productName ?? "").trim() ||
+            String(r.originCountry ?? "").trim() ||
+            String(r.originAddress ?? "").trim() ||
+            String(r.destinationCountry ?? "").trim() ||
+            String(r.destinationAddress ?? "").trim() ||
+            String(r.transportMethod ?? "").trim() ||
+            String(r.transportFuelType ?? "").trim() ||
+            String(r.transportFuelQty ?? "").trim() ||
+            String(r.transportAmount ?? "").trim() ||
+            String(r.emissionFactor ?? "").trim()
+          );
+        })
+        .map((r: Record<string, unknown>) => {
+          const mode = supTransportModeToApi(String(r.transportMethod ?? ""));
+          return {
+            product_name: String(r.productName ?? "").trim(),
+            origin_country: String(r.originCountry ?? "").trim() || undefined,
+            origin_country_code: supIso3166Alpha2(r.originCountry),
+            origin_address_detail: String(r.originAddress ?? "").trim() || undefined,
+            destination_country: String(r.destinationCountry ?? "").trim() || undefined,
+            dest_country_code: supIso3166Alpha2(r.destinationCountry),
+            destination_address_detail: String(r.destinationAddress ?? "").trim() || undefined,
+            transport_mode: mode,
+            transport_fuel_type: String(r.transportFuelType ?? "").trim() || undefined,
+            transport_fuel_qty: String(r.transportFuelQty ?? "").trim() || undefined,
+            transport_fuel_qty_unit: String(r.transportFuelQtyUnit ?? "").trim() || undefined,
+            transport_qty: String(r.transportAmount ?? "").trim() || undefined,
+            transport_qty_unit: String(r.transportAmountUnit ?? "").trim() || undefined,
+            transport_emission_factor: String(r.emissionFactor ?? "").trim() || undefined,
+            transport_emission_factor_unit: String(r.emissionFactorUnit ?? "").trim() || undefined,
+          };
+        });
+      const res = await putSupDataMgmtMonthlySave({
+        projectId: ctx.projectId,
+        productId: ctx.productId,
+        supplierId: ctx.supplierId,
+        reportingYear: ctx.reportingYear,
+        reportingMonth: ctx.reportingMonth,
+        body: {
+          product_variant_id: ctx.productVariantId,
+          delivered: hasDeliveredField ? delivered! : undefined,
+          material_rows,
+          energy_rows,
+          transport_rows,
+          confirm_outlier_ack: supSaveConfirmOutlierRef.current,
+        },
+      });
+      if (!res.saved) {
+        const msg =
+          (res.red_flags ?? [])
+            .map((f) => f.message || f.code)
+            .filter(Boolean)
+            .join("\n") || "저장에 실패했습니다.";
+        toast.error(msg);
+        return;
+      }
+      if ((res.yellow_warnings?.length ?? 0) > 0 && !supSaveConfirmOutlierRef.current) {
+        supSaveConfirmOutlierRef.current = true;
+        toast.message(res.message || "이상치 경고가 있습니다. 수정 완료를 한 번 더 눌러 주세요.", {
+          duration: 9000,
+        });
+        return;
+      }
+      supSaveConfirmOutlierRef.current = false;
+      if ((res.yellow_warnings?.length ?? 0) > 0) {
+        toast.message(res.message || "저장되었습니다.", { duration: 6000 });
+      } else {
+        toast.success(res.message || "저장되었습니다.");
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "저장 요청에 실패했습니다.");
+    } finally {
+      setSupSaveBusy(false);
+    }
   };
 
   const handleTabAddRow = (tabId: string) => {
@@ -1585,11 +2096,12 @@ export function SupplierDetail() {
           {!isCompanyInfoTab && (
             <button
               type="button"
-              onClick={handleSaveComplete}
-              className="flex items-center gap-2 px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90"
+              disabled={supSaveBusy}
+              onClick={() => void handleSaveComplete()}
+              className="flex items-center gap-2 px-6 py-3 rounded-xl text-white transition-all duration-200 hover:opacity-90 disabled:opacity-50 disabled:pointer-events-none"
               style={{ background: 'var(--aifix-primary)' }}
             >
-              <span style={{ fontWeight: 600 }}>수정 완료</span>
+              <span style={{ fontWeight: 600 }}>{supSaveBusy ? "저장 중…" : "수정 완료"}</span>
             </button>
           )}
         </div>
@@ -1629,10 +2141,9 @@ export function SupplierDetail() {
 
   const displayTransport = useMemo(() => {
     if (supplierId === 'own') return editableTransport;
-    const rows = (supplier.transport ?? []).map((r: Record<string, unknown>) => ({
-      ...r,
-      _rowId: (r._rowId as string) ?? newRowId(),
-    }));
+    const rows = (supplier.transport ?? []).map((r: Record<string, unknown>) =>
+      normalizeTransportRowFromSource(r, (r._rowId as string) ?? null),
+    );
     return rows.length > 0 ? rows : [EMPTY_TRANSPORT_ROW()];
   }, [supplierId, editableTransport, supplier.transport]);
 
@@ -2131,6 +2642,9 @@ export function SupplierDetail() {
                           단위 실측 중량 (kg per unit)
                         </th>
                         <th className={SUP_DETAIL_TH}>
+                          불량품 수량
+                        </th>
+                        <th className={SUP_DETAIL_TH}>
                           폐기물량
                         </th>
                         <th className={SUP_DETAIL_TH}>
@@ -2194,6 +2708,9 @@ export function SupplierDetail() {
                           </td>
                           <td className={SUP_DETAIL_TD}>
                             {renderOwnTextCell('product', index, 'standardWeight', product.standardWeight)}
+                          </td>
+                          <td className={SUP_DETAIL_TD}>
+                            {renderOwnTextCell('product', index, 'defectiveQuantity', product.defectiveQuantity)}
                           </td>
                           <td className={SUP_DETAIL_TD}>
                             {renderOwnTextCell('product', index, 'wasteQuantity', product.wasteQuantity)}
@@ -2610,14 +3127,15 @@ export function SupplierDetail() {
             <table className={SUP_DETAIL_TABLE_EDITABLE}>
               <thead>
                 <tr>
-                  <th className={SUP_DETAIL_TH}>
-                    제품명
-                  </th>
+                  <th className={SUP_DETAIL_TH}>제품명</th>
                   <th className={SUP_DETAIL_TH}>출발지 국가</th>
                   <th className={SUP_DETAIL_TH}>출발지 상세 주소</th>
                   <th className={SUP_DETAIL_TH}>도착지 국가</th>
                   <th className={SUP_DETAIL_TH}>도착지 상세주소</th>
                   <th className={SUP_DETAIL_TH}>운송수단</th>
+                  <th className={SUP_DETAIL_TH}>사용 연료</th>
+                  <th className={SUP_DETAIL_TH}>사용 연료량</th>
+                  <th className={SUP_DETAIL_TH}>사용 연료량 단위</th>
                   <th className={SUP_DETAIL_TH}>운송 물량</th>
                   <th className={SUP_DETAIL_TH}>물량 단위</th>
                   <th className={SUP_DETAIL_TH}>운송 배출계수</th>
@@ -2702,7 +3220,7 @@ export function SupplierDetail() {
                       {renderOwnTextCell('transport', index, 'destinationAddress', row.destinationAddress)}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {isOwnSupplier && index === 0 ? (
+                      {isOwnSupplier ? (
                         <SearchableSelectCreatable
                           value={String(row.transportMethod ?? '')}
                           onChange={(v) =>
@@ -2710,25 +3228,9 @@ export function SupplierDetail() {
                               prev.map((r, i) => (i === index ? { ...r, transportMethod: v } : r)),
                             )
                           }
-                          baseOptions={['육운', '해운', '항공', '철도']}
+                          baseOptions={TRANSPORT_MODE_BASE_OPTIONS}
                           placeholder="운송수단 검색·추가"
                         />
-                      ) : isOwnSupplier ? (
-                        <select
-                          value={String(row.transportMethod ?? '')}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setEditableTransport((prev) =>
-                              prev.map((r, i) => (i === index ? { ...r, transportMethod: v } : r)),
-                            );
-                          }}
-                          className={SUP_DETAIL_NATIVE_SELECT}
-                        >
-                          <option value="">선택</option>
-                          <option value="육운">육운</option>
-                          <option value="해운">해운</option>
-                          <option value="항공">항공</option>
-                        </select>
                       ) : (
                         <span style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
                           {String(row.transportMethod ?? '')}
@@ -2736,10 +3238,50 @@ export function SupplierDetail() {
                       )}
                     </td>
                     <td className={SUP_DETAIL_TD}>
+                      {isOwnSupplier ? (
+                        <SearchableSelectCreatable
+                          value={String(row.transportFuelType ?? '')}
+                          onChange={(v) =>
+                            setEditableTransport((prev) =>
+                              prev.map((r, i) => (i === index ? { ...r, transportFuelType: v } : r)),
+                            )
+                          }
+                          baseOptions={TRANSPORT_FUEL_TYPE_BASE_OPTIONS}
+                          placeholder="사용 연료 검색·추가"
+                        />
+                      ) : (
+                        <span style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
+                          {String(row.transportFuelType ?? '')}
+                        </span>
+                      )}
+                    </td>
+                    <td className={SUP_DETAIL_TD}>
+                      {renderOwnTextCell('transport', index, 'transportFuelQty', row.transportFuelQty)}
+                    </td>
+                    <td className={SUP_DETAIL_TD}>
+                      {isOwnSupplier ? (
+                        <SearchableSelectCreatable
+                          value={String(row.transportFuelQtyUnit ?? '')}
+                          onChange={(v) =>
+                            setEditableTransport((prev) =>
+                              prev.map((r, i) => (i === index ? { ...r, transportFuelQtyUnit: v } : r)),
+                            )
+                          }
+                          baseOptions={TRANSPORT_FUEL_QTY_UNIT_BASE_OPTIONS}
+                          allowCreate={false}
+                          placeholder="사용 연료량 단위"
+                        />
+                      ) : (
+                        <span style={{ color: 'var(--aifix-navy)', fontSize: '14px' }}>
+                          {String(row.transportFuelQtyUnit ?? '')}
+                        </span>
+                      )}
+                    </td>
+                    <td className={SUP_DETAIL_TD}>
                       {renderOwnTextCell('transport', index, 'transportAmount', row.transportAmount)}
                     </td>
                     <td className={SUP_DETAIL_TD}>
-                      {isOwnSupplier && index === 0 ? (
+                      {isOwnSupplier ? (
                         <SearchableSelectCreatable
                           value={String(row.transportAmountUnit ?? '')}
                           onChange={(v) =>
@@ -2747,7 +3289,7 @@ export function SupplierDetail() {
                               prev.map((r, i) => (i === index ? { ...r, transportAmountUnit: v } : r)),
                             )
                           }
-                          baseOptions={[...TRANSPORT_CARGO_WEIGHT_UNIT_BASE_OPTIONS]}
+                          baseOptions={TRANSPORT_QTY_UNIT_BASE_OPTIONS}
                           allowCreate={false}
                           placeholder="물량 단위 선택"
                         />
@@ -3002,14 +3544,6 @@ export function SupplierDetail() {
           </div>
         )}
 
-        <input
-          ref={excelFileInputRef}
-          type="file"
-          accept=".csv,.xlsx"
-          className="hidden"
-          onChange={handleExcelFileChange}
-        />
-
         {/* 엑셀 다운로드 모달 */}
         {supplierId === 'own' && showExcelDownloadModal && (
           <div
@@ -3123,6 +3657,97 @@ export function SupplierDetail() {
                 >
                   <Download className="w-5 h-5" />
                   엑셀로 다운받기
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 납품 제품 Excel 업로드 — 원청 Tier0와 동일 UX */}
+        {supplierId === "own" && showSupExcelUploadModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+            <div
+              className="w-full max-w-lg overflow-hidden bg-white"
+              style={{ borderRadius: "20px" }}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="sup-excel-upload-title"
+            >
+              <div className="border-b border-gray-200 p-6">
+                <h2 id="sup-excel-upload-title" className="text-xl font-bold text-gray-900">
+                  납품 제품 Excel 업로드
+                </h2>
+                <p className="mt-2 text-sm text-gray-500">
+                  사업장 정보·담당자 정보·설비 정보 시트는 업로드해도 읽지 않으며, 해당 탭 화면은 바뀌지
+                  않습니다. 사업장 담당자·자재·에너지·생산·운송 시트만 읽어 화면에 반영합니다. DB 반영은
+                  확인 후 「수정 완료」를 누르세요.
+                </p>
+              </div>
+              <div className="p-6">
+                <input
+                  ref={supExcelFileInputRef}
+                  type="file"
+                  accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  className="sr-only"
+                  aria-hidden
+                />
+                <button
+                  type="button"
+                  onClick={() => supExcelFileInputRef.current?.click()}
+                  className="w-full cursor-pointer rounded-lg border-2 border-dashed border-gray-300 p-8 text-center transition-colors hover:border-[#5B3BFA]"
+                >
+                  <Upload className="mx-auto mb-4 h-12 w-12 text-gray-400" />
+                  <p className="mb-2 font-medium text-gray-700">파일을 드래그하거나 클릭하여 선택</p>
+                  <p className="text-sm text-gray-500">
+                    xlsx 파일 (다운로드한 tier0/export와 동일 구조 · 협력사 「엑셀 다운로드」와 동일)
+                  </p>
+                </button>
+                <div className="mt-6 space-y-3">
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="radio"
+                      name="supExcelUploadMode"
+                      checked={supExcelUploadMergeMode === "overwrite"}
+                      onChange={() => setSupExcelUploadMergeMode("overwrite")}
+                      className="text-[#5B3BFA]"
+                      style={{ accentColor: "var(--aifix-primary)" }}
+                    />
+                    <span className="text-sm">기존 화면 데이터 덮어쓰기</span>
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="radio"
+                      name="supExcelUploadMode"
+                      checked={supExcelUploadMergeMode === "append"}
+                      onChange={() => setSupExcelUploadMergeMode("append")}
+                      className="text-[#5B3BFA]"
+                      style={{ accentColor: "var(--aifix-primary)" }}
+                    />
+                    <span className="text-sm">기존 화면 데이터 유지 + 엑셀 행 추가</span>
+                  </label>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-3 border-t border-gray-200 p-6">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSupExcelUploadModal(false);
+                    if (supExcelFileInputRef.current) supExcelFileInputRef.current.value = "";
+                  }}
+                  className="rounded-lg border border-gray-300 px-5 py-2.5 transition-colors hover:bg-gray-50"
+                >
+                  취소
+                </button>
+                <button
+                  type="button"
+                  disabled={supImportBusy}
+                  onClick={() => void handleSupExcelUploadConfirm()}
+                  className="rounded-lg px-5 py-2.5 font-medium text-white disabled:opacity-50"
+                  style={{
+                    background: "linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)",
+                  }}
+                >
+                  {supImportBusy ? "처리 중…" : "미리보기 반영"}
                 </button>
               </div>
             </div>

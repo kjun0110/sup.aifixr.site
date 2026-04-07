@@ -36,6 +36,8 @@ export function apiUrl(path: string): string {
 
 export type ApiClientOptions = Omit<RequestInit, "body"> & {
   json?: unknown;
+  /** FormData·문자열 등 — `json`과 동시에 쓰지 마세요 */
+  body?: BodyInit | null;
   /** true면 401 시 리프레시 1회 후 원 요청 재시도 (기본 true) */
   retryOn401?: boolean;
 };
@@ -93,7 +95,7 @@ export async function apiFetch<T = unknown>(
   path: string,
   options: ApiClientOptions = {},
 ): Promise<T> {
-  const { json, headers: initHeaders, retryOn401 = true, ...rest } = options;
+  const { json, headers: initHeaders, retryOn401 = true, body, ...rest } = options;
   const headers = new Headers(initHeaders);
   const publicInvite = isInvitationPublicPath(path);
   const effectiveRetry401 = retryOn401 && !publicInvite;
@@ -118,7 +120,7 @@ export async function apiFetch<T = unknown>(
     ...rest,
     credentials: rest.credentials ?? "include",
     headers,
-    body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
+    body: json !== undefined ? JSON.stringify(json) : body ?? undefined,
   });
 
   if (res.status === 401 && effectiveRetry401) {
@@ -140,7 +142,7 @@ export async function apiFetch<T = unknown>(
         ...rest,
         credentials: rest.credentials ?? "include",
         headers: h2,
-        body: json !== undefined ? JSON.stringify(json) : (rest as RequestInit).body,
+        body: json !== undefined ? JSON.stringify(json) : body ?? undefined,
       });
     }
   }
@@ -160,6 +162,99 @@ export async function apiFetch<T = unknown>(
   }
 
   return (await res.text()) as T;
+}
+
+/** Content-Disposition에서 저장 파일명 추출 (filename*=UTF-8 우선) */
+export function parseContentDispositionFilename(headerValue: string | null): string | null {
+  if (!headerValue) return null;
+  const star = /filename\*=(?:UTF-8''|utf-8'')([^;\n]+)/i.exec(headerValue);
+  if (star) {
+    const raw = star[1].trim().replace(/^"+|"+$/g, "");
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw || null;
+    }
+  }
+  const quoted = /filename="((?:\\.|[^"\\])*)"/i.exec(headerValue);
+  if (quoted) {
+    return quoted[1].replace(/\\(.)/g, "$1");
+  }
+  const unquoted = /filename=([^;\n]+)/i.exec(headerValue);
+  if (unquoted) {
+    return unquoted[1].trim().replace(/^"+|"+$/g, "");
+  }
+  return null;
+}
+
+/** XLSX 등 바이너리 응답 (Authorization·401 재시도 동일) */
+export async function apiFetchBlob(
+  path: string,
+  options: ApiClientOptions = {},
+): Promise<{ blob: Blob; filename: string | null }> {
+  const { json, headers: initHeaders, retryOn401 = true, body, ...rest } = options;
+  const headers = new Headers(initHeaders);
+  const publicInvite = isInvitationPublicPath(path);
+  const effectiveRetry401 = retryOn401 && !publicInvite;
+
+  if (typeof window !== "undefined" && !publicInvite) {
+    const actor = localStorage.getItem(actorStorageKey());
+    if (actor && !headers.has("X-Actor-User-Id")) {
+      headers.set("X-Actor-User-Id", actor);
+    }
+  }
+
+  const token = getSupAccessToken();
+  if (token && !publicInvite && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  if (json !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const doFetch = () =>
+    fetch(apiUrl(path), {
+      ...rest,
+      credentials: rest.credentials ?? "include",
+      headers,
+      body: json !== undefined ? JSON.stringify(json) : body ?? undefined,
+    });
+
+  let res = await doFetch();
+
+  if (res.status === 401 && effectiveRetry401) {
+    const refreshed = await postSupRefresh();
+    if (refreshed) {
+      const h2 = new Headers(initHeaders);
+      const newToken = getSupAccessToken();
+      if (newToken) {
+        h2.set("Authorization", `Bearer ${newToken}`);
+      }
+      const actor2 = localStorage.getItem(actorStorageKey());
+      if (actor2 && !h2.has("X-Actor-User-Id")) {
+        h2.set("X-Actor-User-Id", actor2);
+      }
+      if (json !== undefined) {
+        h2.set("Content-Type", "application/json");
+      }
+      res = await fetch(apiUrl(path), {
+        ...rest,
+        credentials: rest.credentials ?? "include",
+        headers: h2,
+        body: json !== undefined ? JSON.stringify(json) : body ?? undefined,
+      });
+    }
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${text || res.statusText}`);
+  }
+
+  const filename = parseContentDispositionFilename(res.headers.get("Content-Disposition"));
+  const blob = await res.blob();
+  return { blob, filename };
 }
 
 /** 앱 로드 시 리프레시 쿠키가 있으면 액세스 토큰·actor 복구 */

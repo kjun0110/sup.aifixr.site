@@ -174,6 +174,13 @@ export function ProjectView() {
                   }
                 : null
             }
+            linkedProjectExportLabel={
+              project?.name != null && String(project.name).trim() !== ""
+                ? String(project.name).trim()
+                : project?.productName != null && String(project.productName).trim() !== ""
+                  ? String(project.productName).trim()
+                  : null
+            }
           />
         );
 
@@ -228,7 +235,7 @@ function PlaceholderContent({ tier, tabId }: { tier: string; tabId: string }) {
       "dashboard": "대시보드",
       "supply-chain": "공급망 관리",
       "data-mgmt": "데이터 관리",
-      "ocr-data": "OCR데이터 입력",
+      "ocr-data": "인증 파일 업로드",
       "data-view": "데이터 조회",
       "pcf-submit": "PCF 산정",
       "transmission": "전송",
