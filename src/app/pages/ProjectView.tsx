@@ -121,6 +121,11 @@ export function ProjectView() {
 
   // URL 파라미터에서 탭 읽기
   useEffect(() => {
+    if (searchParams.get("openSupplierInvite") === "1") {
+      // Google 연동 복귀 직후에는 공급망 탭이 떠 있어야 모달 오픈 이펙트가 동작한다.
+      setActiveTab("supply-chain");
+      return;
+    }
     const tabFromUrl = searchParams.get("tab");
     if (tabFromUrl) {
       setActiveTab(tabFromUrl);

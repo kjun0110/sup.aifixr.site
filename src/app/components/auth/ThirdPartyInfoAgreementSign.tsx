@@ -128,7 +128,7 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
       router.push(`/signup/${encodeURIComponent(invite)}/register`);
     } catch (error) {
       console.error('데이터 계약 동의 실패:', error);
-      alert('데이터 계약 동의 처리 중 오류가 발생했습니다.');
+      alert(parseApiDetailMessage(error));
     } finally {
       setAgreeSubmitting(false);
     }

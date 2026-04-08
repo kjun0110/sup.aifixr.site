@@ -10,6 +10,9 @@ export const SUP_GOOGLE_LINK_REOPEN_INVITE_MODAL_KEY = "aifix_sup_google_link_re
 
 /** Gmail 미연동(428) 직전 — 연동 후 자동 재발송할 협력사 초대 페이로드 배열 (JSON) */
 export const SUP_PENDING_INVITE_SEND_STORAGE_KEY = "aifix_pending_sup_invite_send";
+export const SUP_GOOGLE_LINK_REDIRECT_AT_STORAGE_KEY = "aifix_sup_google_link_redirect_at";
+
+const SUP_GOOGLE_LINK_REDIRECT_DEDUP_MS = 15_000;
 
 export function markReopenSupplierInviteModalAfterGoogleLink(): void {
   if (typeof window === "undefined") return;
@@ -50,10 +53,28 @@ export type StartSupGoogleLinkFlowOptions = {
 export async function startSupGoogleLinkFlow(
   opts?: StartSupGoogleLinkFlowOptions,
 ): Promise<void> {
+  if (typeof window !== "undefined") {
+    const now = Date.now();
+    const lastRaw = sessionStorage.getItem(SUP_GOOGLE_LINK_REDIRECT_AT_STORAGE_KEY);
+    const last = Number(lastRaw);
+    if (Number.isFinite(last) && now - last < SUP_GOOGLE_LINK_REDIRECT_DEDUP_MS) {
+      // 동일 세션에서 짧은 시간 내 중복 호출 방지 (초대 시 2회 연동 진입 이슈 방어)
+      return;
+    }
+    sessionStorage.setItem(SUP_GOOGLE_LINK_REDIRECT_AT_STORAGE_KEY, String(now));
+  }
+
   rememberReturnPathForSupGoogleLink();
   if (opts?.reopenInviteModal) {
     markReopenSupplierInviteModalAfterGoogleLink();
   }
-  const authUrl = await fetchSupGoogleLinkAuthUrl();
-  window.location.assign(authUrl);
+  try {
+    const authUrl = await fetchSupGoogleLinkAuthUrl();
+    window.location.assign(authUrl);
+  } catch (e) {
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem(SUP_GOOGLE_LINK_REDIRECT_AT_STORAGE_KEY);
+    }
+    throw e;
+  }
 }

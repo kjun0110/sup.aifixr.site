@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
+  SUP_GOOGLE_LINK_REDIRECT_AT_STORAGE_KEY,
   SUP_GOOGLE_LINK_RETURN_STORAGE_KEY,
   SUP_GOOGLE_LINK_REOPEN_INVITE_MODAL_KEY,
   SUP_PENDING_INVITE_SEND_STORAGE_KEY,
@@ -22,6 +23,9 @@ export function SupGoogleLinkReturnHandler() {
     const sp = new URLSearchParams(window.location.search);
     if (sp.get("google_linked") !== "1") return;
     handled.current = true;
+
+    // 복귀 시 중복 진입 방지 락 해제
+    sessionStorage.removeItem(SUP_GOOGLE_LINK_REDIRECT_AT_STORAGE_KEY);
 
     const ret = sessionStorage.getItem(SUP_GOOGLE_LINK_RETURN_STORAGE_KEY);
     sessionStorage.removeItem(SUP_GOOGLE_LINK_RETURN_STORAGE_KEY);
