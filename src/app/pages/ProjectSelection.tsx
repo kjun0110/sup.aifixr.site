@@ -8,7 +8,7 @@ import { getMyProjects, SupplierProject } from "../../lib/api/supply-chain";
 import { getSupAccessToken } from "../../lib/api/sessionAccessToken";
 import { AIFIXR_SESSION_UPDATED_EVENT } from "../../lib/api/client";
 
-// Mock data for demonstration
+// Mock data for demonstration (요청에 따라 유지)
 const mockProjects = [
   {
     id: "p1",
@@ -44,6 +44,21 @@ const mockProjects = [
     status: "진행중",
   },
 ];
+
+function buildDisplayName(project: SupplierProject): string {
+  const rawName = String(project.name ?? "").trim();
+  const item = String(project.productName ?? "").trim();
+  if (!item) return rawName || "[알 수 없음] 납품";
+  if (!rawName) return `[${project.clientName || "알 수 없음"}] ${item} 납품`;
+  // API 제목이 "[회사] 납품" 형태면 품목명을 삽입
+  if (/^\[[^\]]+\]\s*납품$/.test(rawName)) {
+    // catalog 코드(prodA 등)로 보이는 값은 제목에 끼워 넣지 않음
+    if (!/[가-힣]/.test(item)) return rawName;
+    return rawName.replace(/납품$/, `${item} 납품`);
+  }
+  // 이미 품목이 들어있거나 다른 포맷이면 원문 유지
+  return rawName;
+}
 
 export function ProjectSelection() {
   const router = useRouter();
@@ -108,7 +123,11 @@ export function ProjectSelection() {
     };
   }, [router]);
 
-  const allProjects = [...mockProjects, ...realProjects];
+  const displayRealProjects: SupplierProject[] = realProjects.map((project) => ({
+    ...project,
+    name: buildDisplayName(project),
+  }));
+  const allProjects = [...mockProjects, ...displayRealProjects];
   return (
     <div>
       {/* Page Header */}
@@ -167,7 +186,7 @@ export function ProjectSelection() {
             {mockProjects.map((project) => (
               <ProjectCard key={`mock-${project.id}`} {...project} />
             ))}
-            {realProjects.map((project) => (
+            {displayRealProjects.map((project) => (
               <ProjectCard key={`real-${project.id}`} {...project} />
             ))}
           </>

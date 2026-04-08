@@ -2,7 +2,7 @@
 
 import { useState, useEffect, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { Building2, User, Mail, Phone, Lock, Briefcase, ArrowLeft, AlertCircle } from 'lucide-react';
+import { Building2, User, Mail, Phone, Lock, Briefcase, ArrowLeft, AlertCircle, MapPin, X } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { cn } from '../ui/utils';
@@ -11,9 +11,9 @@ import { Checkbox } from '../ui/checkbox';
 import { Input } from '../ui/input';
 import { getInvitationPreview } from '@/lib/api/invitation';
 import { submitSignup, submitGoogleSignup } from '@/lib/api/iam';
+import { getIso3166Alpha2KoOptions } from '@/lib/iso3166Alpha2Ko';
 
 const LS_INVITE_KEY = 'aifix_mock_invite';
-
 type SignupMethod = 'none' | 'google' | 'email';
 
 /** 사업자등록번호: 숫자만 추출 */
@@ -64,6 +64,109 @@ const Field = ({
     </div>
   );
 };
+
+function CountryLocationPicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const entries = getIso3166Alpha2KoOptions();
+
+  const normalized = q.trim().toLowerCase();
+  const filtered = entries.filter((e) => {
+    if (!normalized) return true;
+    return e.nameKo.toLowerCase().includes(normalized) || e.code.toLowerCase().includes(normalized);
+  });
+
+  const close = () => {
+    setOpen(false);
+    setQ('');
+  };
+
+  return (
+    <div>
+      <label className="block text-sm font-semibold text-gray-900 mb-2">
+        국가소재지
+        <span className="text-red-500 ml-1">*</span>
+      </label>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-left text-sm text-gray-900 transition-all hover:border-gray-400"
+      >
+        <span className="flex items-center gap-2">
+          <MapPin className="w-4 h-4 text-gray-400" />
+          <span className="truncate">{value || '국가명 검색 (클릭)'}</span>
+        </span>
+      </button>
+      {open && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onClick={close}>
+          <div
+            className="flex max-h-[min(32rem,85vh)] w-full max-w-lg min-h-0 flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+              <div className="flex items-center gap-2">
+                <MapPin className="h-5 w-5 text-[#5B3BFA]" />
+                <h2 className="text-lg font-bold text-gray-900">국가 선택</h2>
+              </div>
+              <button
+                type="button"
+                onClick={close}
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                aria-label="닫기"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="shrink-0 space-y-2 border-b border-gray-100 px-5 py-3">
+              <Input
+                type="text"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="국가명·코드 검색 (예: 한국, KR)"
+                className="bg-white"
+              />
+              <p className="text-xs text-gray-500">국가명(한글) 또는 ISO 코드로 검색합니다. ({filtered.length}건)</p>
+            </div>
+            <ul className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
+              {filtered.map((e) => (
+                <li key={e.code}>
+                  <button
+                    type="button"
+                    className="w-full rounded-lg px-3 py-2 text-left text-sm text-[var(--aifix-navy)] hover:bg-violet-50"
+                    onClick={() => {
+                      onChange(e.nameKo);
+                      close();
+                    }}
+                  >
+                    {e.nameKo} <span className="font-mono text-xs text-gray-500">({e.code})</span>
+                  </button>
+                </li>
+              ))}
+              {filtered.length === 0 && <li className="px-3 py-6 text-center text-sm text-gray-400">검색 결과 없음</li>}
+            </ul>
+            <div className="flex justify-end border-t border-gray-200 px-5 py-3">
+              <button
+                type="button"
+                onClick={close}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function SignupRegister({ invite }: { invite?: string }) {
   const router = useRouter();
@@ -501,13 +604,9 @@ export function SignupRegister({ invite }: { invite?: string }) {
                   ) : null}
                 </div>
                 <div className="col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <Field
-                    label="국가소재지"
-                    required
-                    icon={<Building2 className="w-4 h-4" />}
+                  <CountryLocationPicker
                     value={companyCountryLocation}
                     onChange={setCompanyCountryLocation}
-                    placeholder="예: 대한민국"
                   />
                   <Field
                     label="상세주소"

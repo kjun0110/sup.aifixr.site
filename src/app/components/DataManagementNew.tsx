@@ -119,6 +119,10 @@ function mapSupTreeToSupplierNode(
   const rawKg = api.pcf_total_co2e_kg;
   const pcfResult =
     rawKg != null && Number.isFinite(Number(rawKg)) ? Number(rawKg) : null;
+  const mappedChildren = (api.children ?? []).map((ch) => mapSupTreeToSupplierNode(ch));
+  // 데이터 관리 트리에는 승인된(approved) 하위 노드만 표시
+  const visibleChildren = mappedChildren.filter((ch) => ch.dataStatus === "완료");
+
   return {
     id,
     nodeId: api.node_id ?? null,
@@ -132,7 +136,7 @@ function mapSupTreeToSupplierNode(
     pcfStatus,
     pcfResult,
     isOwn: Boolean(api.is_me),
-    children: (api.children ?? []).map((ch) => mapSupTreeToSupplierNode(ch)),
+    children: visibleChildren,
   };
 }
 

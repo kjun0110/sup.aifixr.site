@@ -1577,9 +1577,9 @@ export function SupplierDetail() {
 
   const supplier = useMemo(() => {
     const base = supplierFromQuery
-      ? supplierFromQuery
+    ? supplierFromQuery
       : supplierId && mockSupplierData[supplierId as keyof typeof mockSupplierData]
-        ? mockSupplierData[supplierId as keyof typeof mockSupplierData]
+      ? mockSupplierData[supplierId as keyof typeof mockSupplierData]
         : mockSupplierData.supplier1;
     if (supplierId !== "own" || !ownProfile?.has_profile) {
       return base;
@@ -2426,8 +2426,8 @@ export function SupplierDetail() {
   const productNameOptions: string[] = useMemo(() => {
     const fromContract = contractDeliverableProductNames.filter((n) => n.trim().length > 0);
     const fromTable: string[] = Array.from(
-      new Set(
-        (displayProducts ?? [])
+    new Set(
+      (displayProducts ?? [])
           .map((p: { name?: unknown }) => String(p?.name ?? "").trim())
           .filter((n: string) => n.length > 0),
       ),
@@ -2808,15 +2808,15 @@ export function SupplierDetail() {
                     {websiteUrlRaw ? (
                       supplierId === "own" ? (
                         <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>{websiteUrlRaw}</span>
-                      ) : (
-                        <a
+                    ) : (
+                      <a 
                           href={websiteUrlRaw}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: 'var(--aifix-primary)', textDecoration: 'underline' }}
-                        >
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        style={{ color: 'var(--aifix-primary)', textDecoration: 'underline' }}
+                      >
                           {websiteUrlRaw}
-                        </a>
+                      </a>
                       )
                     ) : (
                       <span style={{ color: 'var(--aifix-navy)', fontWeight: 500 }}>미기입</span>
@@ -3358,7 +3358,7 @@ export function SupplierDetail() {
                       {isOwnSupplier ? (
                         <div className="flex min-w-0 items-center gap-1">
                           <div className="min-w-0 flex-1">
-                            {renderOwnTextCell('energy', index, 'emissionFactor', row.emissionFactor)}
+                      {renderOwnTextCell('energy', index, 'emissionFactor', row.emissionFactor)}
                           </div>
                           <button
                             type="button"
@@ -3576,7 +3576,7 @@ export function SupplierDetail() {
                       {isOwnSupplier ? (
                         <div className="flex min-w-0 items-center gap-1">
                           <div className="min-w-0 flex-1">
-                            {renderOwnTextCell('transport', index, 'emissionFactor', row.emissionFactor)}
+                      {renderOwnTextCell('transport', index, 'emissionFactor', row.emissionFactor)}
                           </div>
                           <button
                             type="button"
@@ -4110,30 +4110,30 @@ export function SupplierDetail() {
                       확인해 주세요.
                     </div>
                   ) : (
-                    <table className="w-full border-collapse">
-                      <thead>
-                        <tr>
-                          <th className="w-[72px] py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                            선택
-                          </th>
-                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                            부서명
-                          </th>
-                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                            직급
-                          </th>
-                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                            이름
-                          </th>
-                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                            이메일
-                          </th>
-                          <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
-                            연락처
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
+                  <table className="w-full border-collapse">
+                    <thead>
+                      <tr>
+                        <th className="w-[72px] py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                          선택
+                        </th>
+                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                          부서명
+                        </th>
+                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                          직급
+                        </th>
+                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                          이름
+                        </th>
+                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                          이메일
+                        </th>
+                        <th className="py-3 px-4 text-left text-sm font-semibold" style={{ color: 'var(--aifix-navy)' }}>
+                          연락처
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
                         {companyContactsForRegisterModal.map((c) => {
                           const alreadyOnSheet = editableContacts.some((p: any) =>
                             isSameContactAsEditableRow(
@@ -4152,9 +4152,9 @@ export function SupplierDetail() {
                                 alreadyOnSheet ? "bg-slate-50/90" : "hover:bg-gray-50"
                               }`}
                             >
-                              <td className="py-3 px-4">
-                                <input
-                                  type="checkbox"
+                          <td className="py-3 px-4">
+                            <input
+                              type="checkbox"
                                   disabled={alreadyOnSheet}
                                   checked={
                                     !alreadyOnSheet && selectedRegisterContactKeys.includes(c.rowKey)
@@ -4168,16 +4168,16 @@ export function SupplierDetail() {
                                       : undefined
                                   }
                                   style={{ accentColor: "var(--aifix-primary)" }}
-                                />
-                              </td>
+                            />
+                          </td>
                               <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
-                                {c.department}
-                              </td>
+                            {c.department}
+                          </td>
                               <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
-                                {c.position}
-                              </td>
+                            {c.position}
+                          </td>
                               <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
-                                {c.name}
+                            {c.name}
                                 {alreadyOnSheet ? (
                                   <span
                                     className="ml-2 text-xs font-medium text-gray-400"
@@ -4186,18 +4186,18 @@ export function SupplierDetail() {
                                     (등록됨)
                                   </span>
                                 ) : null}
-                              </td>
+                          </td>
                               <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
                                 {c.emailDisplay}
-                              </td>
+                          </td>
                               <td className="py-3 px-4 text-sm" style={{ color: "var(--aifix-navy)" }}>
                                 {c.phoneDisplay}
-                              </td>
-                            </tr>
+                          </td>
+                        </tr>
                           );
                         })}
-                      </tbody>
-                    </table>
+                    </tbody>
+                  </table>
                   )}
                 </div>
               </div>
