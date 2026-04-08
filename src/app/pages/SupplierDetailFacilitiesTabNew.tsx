@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Info, X } from "lucide-react";
 import { emptySiteForm, useSites, type Site } from "../contexts/SiteContext";
 
-const SUPPLIER_TYPE_SMELTER = "가공사/제련사" as const;
+const SUPPLIER_TYPE_SMELTER = "채굴/제련사" as const;
 
 function isSmelterSupplierType(supplierType: string): boolean {
   return supplierType.trim() === SUPPLIER_TYPE_SMELTER;
@@ -15,7 +15,7 @@ function displaySiteCell(value: unknown): string {
   return t === "" ? "미기입" : t;
 }
 
-/** RMI: 가공사/제련사만 미인증·값, 그 외 해당없음 (회사 프로필·기업 기본정보와 동일) */
+/** RMI: 채굴/제련사만 미인증·값, 그 외 해당없음 (회사 프로필·기업 기본정보와 동일) */
 function displayRmiForFacilityTable(supplierType: string, rmiStored: unknown): string {
   if (isSmelterSupplierType(supplierType)) {
     const r = rmiStored == null ? "" : String(rmiStored).trim();

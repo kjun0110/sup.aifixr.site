@@ -165,9 +165,11 @@ function collectTreeNodeIds(node: CompanyNode, acc: string[]) {
 
 export function SupplyChainManagement({
   tier,
+  supplierType = "",
   inviteContext,
 }: {
   tier: "tier1" | "tier2" | "tier3";
+  supplierType?: string;
   inviteContext?: SupplierInviteContext | null;
 }) {
   const params = useParams();
@@ -196,6 +198,7 @@ export function SupplyChainManagement({
   const [registerMonthlyQty, setRegisterMonthlyQty] = useState("");
   const [registerUnit, setRegisterUnit] = useState("");
   const [apiSubtree, setApiSubtree] = useState<SupplierSubtreeResponse | null>(null);
+  const isMiningSmelter = supplierType.trim() === "채굴/제련사";
 
   const useApiTree =
     inviteContext?.projectId != null &&
@@ -225,35 +228,9 @@ export function SupplyChainManagement({
     return getRegisteredDirectChildren(inviteContext.projectId);
   }, [inviteContext?.projectId]);
 
-  type DataRequestStatus = 'NOT_REQUESTED' | 'REQUESTED' | 'SUBMITTED';
-  const LS_REQUEST_STATUS_KEY = 'aifix_mock_data_request_status_by_target_v1';
-
-  const [requestStatusById, setRequestStatusById] = useState<Record<string, DataRequestStatus>>({});
-
   // 권한 설정 (데이터 요청 버튼은 데이터관리 탭으로 이동; 여기서는 참고용)
   const canInviteSuppliers = true;
   const canRequestData = tier === "tier1" || tier === "tier2";
-
-  // Load request status mock from localStorage
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LS_REQUEST_STATUS_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Record<string, DataRequestStatus>;
-      setRequestStatusById(parsed ?? {});
-    } catch {
-      // ignore (mock)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_REQUEST_STATUS_KEY, JSON.stringify(requestStatusById));
-    } catch {
-      // ignore (mock)
-    }
-  }, [LS_REQUEST_STATUS_KEY, requestStatusById]);
 
   /** Google Gmail 연동 후 복귀 시 초대 모달 다시 열기 */
   useEffect(() => {
@@ -273,22 +250,6 @@ export function SupplyChainManagement({
 
   const currentTierNum = tier === 'tier1' ? 1 : tier === 'tier2' ? 2 : 3;
 
-  const getRequestStatusLabel = (status: DataRequestStatus | undefined) => {
-    if (status === 'REQUESTED') return '요청됨';
-    if (status === 'SUBMITTED') return '제출 완료';
-    return '미요청';
-  };
-
-  const getRequestStatusStyle = (status: DataRequestStatus | undefined) => {
-    switch (status) {
-      case 'REQUESTED':
-        return { bg: '#FFF4E6', text: '#FF9800', border: '#FFCC80' };
-      case 'SUBMITTED':
-        return { bg: '#E8F5E9', text: '#4CAF50', border: '#A5D6A7' };
-      default:
-        return { bg: '#F5F5F5', text: '#757575', border: '#E0E0E0' };
-    }
-  };
 
   // Mock tree data — 차수: 0차=SDI(원청), 1차=동우/한국/테크, 2차=세진/그린(동우 직하위) 등, 3차=디오/솔브(세진 직하위), 4차=디오 직하위 1개
   const getTreeData = (): CompanyNode => {
@@ -471,13 +432,6 @@ export function SupplyChainManagement({
     setExpandedNodes(new Set(acc));
   }, [useApiTree, apiSubtree]);
 
-  const getRequestIndicator = (id: string) => {
-    const st = requestStatusById[id];
-    if (st === 'REQUESTED') return <span title="요청됨" style={{ marginLeft: 6, fontSize: 12 }}>📩</span>;
-    if (st === 'SUBMITTED') return <span title="제출 완료" style={{ marginLeft: 6, fontSize: 12 }}>✅</span>;
-    return null;
-  };
-
   // Mock company list data — 차수 라벨: 1차/2차/3차/4차
   const getAllCompanies = (): Company[] => {
     if (tier === "tier1") {
@@ -616,13 +570,6 @@ export function SupplyChainManagement({
             }}
           >
             {node.name}
-            {/* Request status indicator (📩 / ✅) */}
-            {(() => {
-              const st = requestStatusById[node.id];
-              if (st === 'REQUESTED') return <span title="요청됨" style={{ marginLeft: 6, fontSize: 12 }}>📩</span>;
-              if (st === 'SUBMITTED') return <span title="제출 완료" style={{ marginLeft: 6, fontSize: 12 }}>✅</span>;
-              return null;
-            })()}
           </span>
           
           {getStatusIcon(node.status)}
@@ -665,31 +612,43 @@ export function SupplyChainManagement({
         <div className="flex items-center gap-3">
           <button
             onClick={() => {
+              if (isMiningSmelter) return;
               setShowRegisterDirectChildModal(true);
               setCompanyQuery("");
               setSelectedRegisterCompany(null);
               setRegisterBusinessNumber("");
               setCompanyDropdownOpen(false);
             }}
+            disabled={isMiningSmelter}
             className="flex items-center gap-2 px-6 py-3 rounded-xl transition-all duration-200 hover:scale-105"
             style={{
-              background: "white",
-              border: "1px solid var(--aifix-primary)",
-              color: "var(--aifix-primary)",
+              background: isMiningSmelter ? "#F5F5F5" : "white",
+              border: isMiningSmelter ? "1px solid #E0E0E0" : "1px solid var(--aifix-primary)",
+              color: isMiningSmelter ? "#9E9E9E" : "var(--aifix-primary)",
               fontWeight: 700,
+              cursor: isMiningSmelter ? "not-allowed" : "pointer",
+              opacity: isMiningSmelter ? 0.6 : 1,
             }}
           >
             <UserPlus className="w-5 h-5" />
             직하위차사 등록
           </button>
           <button
-            onClick={() => setShowInviteModal(true)}
+            onClick={() => {
+              if (isMiningSmelter) return;
+              setShowInviteModal(true);
+            }}
+            disabled={isMiningSmelter}
             className="flex items-center gap-2 px-6 py-3 rounded-xl transition-all duration-200 hover:scale-105"
             style={{
-              background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
-              boxShadow: '0px 4px 12px rgba(91, 59, 250, 0.2)',
-              color: 'white',
+              background: isMiningSmelter
+                ? "#F5F5F5"
+                : 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+              boxShadow: isMiningSmelter ? "none" : '0px 4px 12px rgba(91, 59, 250, 0.2)',
+              color: isMiningSmelter ? "#9E9E9E" : 'white',
               fontWeight: 600,
+              cursor: isMiningSmelter ? "not-allowed" : "pointer",
+              opacity: isMiningSmelter ? 0.6 : 1,
             }}
           >
             <UserPlus className="w-5 h-5" />
@@ -794,13 +753,21 @@ export function SupplyChainManagement({
                 협력사를 등록하고 데이터를 요청할 수 있습니다.
               </p>
               <button
-                onClick={() => setShowInviteModal(true)}
+                onClick={() => {
+                  if (isMiningSmelter) return;
+                  setShowInviteModal(true);
+                }}
+                disabled={isMiningSmelter}
                 className="flex items-center gap-2 px-6 py-3 rounded-xl transition-all duration-200 hover:scale-105"
                 style={{
-                  background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
-                  boxShadow: '0px 4px 12px rgba(91, 59, 250, 0.2)',
-                  color: 'white',
+                  background: isMiningSmelter
+                    ? "#F5F5F5"
+                    : 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+                  boxShadow: isMiningSmelter ? "none" : '0px 4px 12px rgba(91, 59, 250, 0.2)',
+                  color: isMiningSmelter ? "#9E9E9E" : 'white',
                   fontWeight: 600,
+                  cursor: isMiningSmelter ? "not-allowed" : "pointer",
+                  opacity: isMiningSmelter ? 0.6 : 1,
                 }}
               >
                 <UserPlus className="w-5 h-5" />

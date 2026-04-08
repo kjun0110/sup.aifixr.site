@@ -71,6 +71,7 @@ function periodToYmKorean(period: string): string | null {
 
 type SupplierNode = {
   id: string;
+  nodeId?: number | null;
   name: string;
   country: string;
   type: string;
@@ -120,6 +121,7 @@ function mapSupTreeToSupplierNode(
     rawKg != null && Number.isFinite(Number(rawKg)) ? Number(rawKg) : null;
   return {
     id,
+    nodeId: api.node_id ?? null,
     name: api.is_me ? `${api.supplier_name} (나)` : api.supplier_name,
     country: api.country?.trim() || "—",
     type: api.company_type?.trim() || "—",
@@ -163,6 +165,7 @@ export function DataManagementNew({
   const [requestDueDate, setRequestDueDate] = useState('');
   const [apiRoot, setApiRoot] = useState<SupplierNode | null>(null);
   const [apiLoading, setApiLoading] = useState(false);
+  const [remindingNodeIds, setRemindingNodeIds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     if (!linkedProject || !showResults || !period?.trim()) {
@@ -716,6 +719,66 @@ export function DataManagementNew({
     );
   };
 
+  const handleSendReminder = async (supplier: SupplierNode) => {
+    if (!linkedProject) {
+      toast.error("실데이터 프로젝트에서만 리마인드 전송이 가능합니다.");
+      return;
+    }
+    if (!linkedProject.productVariantId) {
+      toast.error("제품 변형 정보가 없어 리마인드 전송이 불가합니다.");
+      return;
+    }
+    const targetNodeId = supplier.nodeId;
+    if (!Number.isFinite(targetNodeId)) {
+      toast.error("리마인드 대상 노드를 찾지 못했습니다.");
+      return;
+    }
+    const ym = periodToYmKorean(period);
+    if (!ym) {
+      toast.error("요청 대상 월을 확인할 수 없습니다.");
+      return;
+    }
+    const [ys, ms] = ym.split("-");
+    const reportingYear = parseInt(ys, 10);
+    const reportingMonth = parseInt(ms, 10);
+    if (!Number.isFinite(reportingYear) || !Number.isFinite(reportingMonth)) {
+      toast.error("요청 대상 월을 확인할 수 없습니다.");
+      return;
+    }
+    if (remindingNodeIds.has(targetNodeId!)) return;
+
+    setRemindingNodeIds((prev) => {
+      const next = new Set(prev);
+      next.add(targetNodeId!);
+      return next;
+    });
+
+    const payload: SupDataRequestCreateBody = {
+      project_id: linkedProject.projectId,
+      product_id: linkedProject.productId,
+      product_variant_id: linkedProject.productVariantId,
+      reporting_year: reportingYear,
+      reporting_month: reportingMonth,
+      requester_supply_chain_node_id: apiRoot?.nodeId ?? null,
+      request_mode: "direct",
+      message: "데이터를 입력하세요",
+      target_supply_chain_node_ids: [targetNodeId!],
+    };
+    try {
+      await postSupDataRequest(payload);
+      toast.success(`${supplier.name}에 리마인드 알림을 전송했습니다.`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`리마인드 전송 실패: ${msg}`);
+    } finally {
+      setRemindingNodeIds((prev) => {
+        const next = new Set(prev);
+        next.delete(targetNodeId!);
+        return next;
+      });
+    }
+  };
+
   const renderSupplierRow = (supplier: SupplierNode, level: number = 0) => {
     const isExpanded = expandedNodes.has(supplier.id);
     const hasChildren = supplier.children && supplier.children.length > 0;
@@ -795,7 +858,21 @@ export function DataManagementNew({
 
           {/* 데이터 상태 - 중앙 정렬 */}
           <div className="min-w-0 flex justify-center">
-            {getPcfUnifiedStatusBadge(supplier)}
+            <div className="flex items-center gap-2">
+              {getPcfUnifiedStatusBadge(supplier)}
+              {supplier.pcfStatus === "미제출" &&
+                !supplier.isOwn &&
+                typeof supplier.nodeId === "number" && (
+                  <button
+                    type="button"
+                    onClick={() => void handleSendReminder(supplier)}
+                    disabled={remindingNodeIds.has(supplier.nodeId)}
+                    className="px-2.5 py-1 text-xs border border-[#5B3BFA] text-[#5B3BFA] rounded-md hover:bg-violet-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {remindingNodeIds.has(supplier.nodeId) ? "전송 중…" : "리마인드"}
+                  </button>
+                )}
+            </div>
           </div>
 
           {/* 상세보기 - 중앙 정렬 */}

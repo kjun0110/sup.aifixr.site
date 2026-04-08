@@ -7,12 +7,9 @@ import {
 import { setSupAccessToken, getSupAccessToken } from "./sessionAccessToken";
 
 const DEFAULT_ACTOR_STORAGE_KEY = "x-actor-user-id";
-
+/** @deprecated JWT 식별로 전환됨. 신규 코드에서 사용하지 마세요. */
 export function actorStorageKey(): string {
-  return (
-    process.env.NEXT_PUBLIC_ACTOR_STORAGE_KEY?.trim() ||
-    DEFAULT_ACTOR_STORAGE_KEY
-  );
+  return process.env.NEXT_PUBLIC_ACTOR_STORAGE_KEY?.trim() || DEFAULT_ACTOR_STORAGE_KEY;
 }
 
 /** 초대 공개 API — 인증 없음. 만료된 Bearer·actor를 붙이면 401/혼선만 유발 */
@@ -73,9 +70,6 @@ async function postSupRefresh(): Promise<boolean> {
         return false;
       }
       setSupAccessToken(data.accessToken);
-      if (typeof window !== "undefined" && data.user?.id) {
-        localStorage.setItem(actorStorageKey(), data.user.id);
-      }
       return true;
     } catch {
       setSupAccessToken(null);
@@ -88,8 +82,7 @@ async function postSupRefresh(): Promise<boolean> {
 }
 
 /**
- * 공통 fetch: baseURL, X-Actor-User-Id(로컬스토리지), JSON 처리
- * JWT 도입 시 Authorization 헤더를 여기서 같이 처리하면 됨.
+ * 공통 fetch: baseURL + Authorization(JWT)
  */
 export async function apiFetch<T = unknown>(
   path: string,
@@ -99,13 +92,6 @@ export async function apiFetch<T = unknown>(
   const headers = new Headers(initHeaders);
   const publicInvite = isInvitationPublicPath(path);
   const effectiveRetry401 = retryOn401 && !publicInvite;
-
-  if (typeof window !== "undefined" && !publicInvite) {
-    const actor = localStorage.getItem(actorStorageKey());
-    if (actor && !headers.has("X-Actor-User-Id")) {
-      headers.set("X-Actor-User-Id", actor);
-    }
-  }
 
   const token = getSupAccessToken();
   if (token && !publicInvite && !headers.has("Authorization")) {
@@ -130,10 +116,6 @@ export async function apiFetch<T = unknown>(
       const newToken = getSupAccessToken();
       if (newToken) {
         h2.set("Authorization", `Bearer ${newToken}`);
-      }
-      const actor2 = localStorage.getItem(actorStorageKey());
-      if (actor2 && !h2.has("X-Actor-User-Id")) {
-        h2.set("X-Actor-User-Id", actor2);
       }
       if (json !== undefined) {
         h2.set("Content-Type", "application/json");
@@ -197,13 +179,6 @@ export async function apiFetchBlob(
   const publicInvite = isInvitationPublicPath(path);
   const effectiveRetry401 = retryOn401 && !publicInvite;
 
-  if (typeof window !== "undefined" && !publicInvite) {
-    const actor = localStorage.getItem(actorStorageKey());
-    if (actor && !headers.has("X-Actor-User-Id")) {
-      headers.set("X-Actor-User-Id", actor);
-    }
-  }
-
   const token = getSupAccessToken();
   if (token && !publicInvite && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
@@ -230,10 +205,6 @@ export async function apiFetchBlob(
       const newToken = getSupAccessToken();
       if (newToken) {
         h2.set("Authorization", `Bearer ${newToken}`);
-      }
-      const actor2 = localStorage.getItem(actorStorageKey());
-      if (actor2 && !h2.has("X-Actor-User-Id")) {
-        h2.set("X-Actor-User-Id", actor2);
       }
       if (json !== undefined) {
         h2.set("Content-Type", "application/json");

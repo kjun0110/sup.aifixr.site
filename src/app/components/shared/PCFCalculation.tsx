@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { toast } from "sonner";
 import { usePathname, useSearchParams } from "next/navigation";
 import { 
@@ -20,26 +20,130 @@ import {
   Activity
 } from "lucide-react";
 import { MonthPicker } from "../MonthPicker";
-import { postSupPcfRunExecute, postSupPcfTransferShare } from "@/lib/api/pcf";
+import {
+  getSupPcfReadiness,
+  getSupPcfRuns,
+  getSupPcfTransferReadiness,
+  postSupPcfRunExecute,
+  postSupPcfTransferShare,
+  type PcfReadinessSupplierResponse,
+  type PcfRunListItemDto,
+  type SupPcfTransferReadinessResponse,
+} from "@/lib/api/pcf";
+import { restoreSupSessionFromCookie, AIFIXR_SESSION_UPDATED_EVENT } from "@/lib/api/client";
+import { getMyProjectDetail, type SupplierProject } from "@/lib/api/supply-chain";
 
 type TierType = "tier1" | "tier2" | "tier3";
 type ReadinessStatus = "complete" | "partial" | "incomplete";
 
 interface PCFCalculationProps {
   tier: TierType;
+  supplierType?: string;
 }
 
 interface CalculationHistoryItem {
   id: string;
   product: string;
-  supplyVersion: string;
   bomVersion: string;
   period: string;
-  coverage: string;
   dqr: string;
   totalEmission: string;
+  kgBasedPcf: string;
   status: "complete" | "partial" | "processing";
   date: string;
+}
+
+function mapApiRunKindToSupplyVersion(runKind: string): string {
+  const k = (runKind || "").toLowerCase();
+  if (k === "batch") return "부분산정";
+  if (k === "node_rollup") return "최종산정";
+  return runKind.trim() || "—";
+}
+
+function mapApiRunStateToUi(
+  runKind: string,
+  status: string,
+): "complete" | "partial" | "processing" {
+  const s = (status || "").toLowerCase();
+  const k = (runKind || "").toLowerCase();
+  if (s === "pending") return "processing";
+  if (s === "success" && k === "node_rollup") return "complete";
+  if (s === "success" && k === "batch") return "partial";
+  return "processing";
+}
+
+function mapPcfRunToHistoryItem(
+  r: PcfRunListItemDto,
+  dqrHint: string | null,
+): CalculationHistoryItem {
+  const period = `${r.reporting_year}-${String(r.reporting_month).padStart(2, "0")}`;
+  const total =
+    r.total_co2e_kg != null && Number.isFinite(Number(r.total_co2e_kg))
+      ? `${Number(r.total_co2e_kg).toLocaleString(undefined, { maximumFractionDigits: 2 })} kg CO₂e`
+      : "—";
+  const kgPcf =
+    r.pcf_per_product_mass_kg != null && Number.isFinite(Number(r.pcf_per_product_mass_kg))
+      ? Number(r.pcf_per_product_mass_kg).toFixed(4)
+      : "—";
+  const when = r.finished_at ?? r.created_at ?? "";
+  const dateStr = when ? when.slice(0, 10) : "—";
+  return {
+    id: r.display_id?.trim() || `run-${r.id}`,
+    product: (r.product_name ?? "").trim() || "—",
+    bomVersion: (r.bom_label ?? "").trim() || "—",
+    period,
+    dqr: dqrHint ?? "—",
+    totalEmission: total,
+    kgBasedPcf: kgPcf,
+    status: mapApiRunStateToUi(r.run_kind, r.status),
+    date: dateStr,
+  };
+}
+
+function getRunTimestampMs(r: PcfRunListItemDto): number {
+  const raw = r.finished_at ?? r.created_at;
+  if (!raw) return 0;
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? t : 0;
+}
+
+function getRunPriorityScore(r: PcfRunListItemDto): number {
+  const kind = (r.run_kind || "").toLowerCase();
+  const status = (r.status || "").toLowerCase();
+  const isFinalKind = kind === "node_rollup";
+  const isDone = status === "success" || status === "completed";
+  const isPending = status === "pending";
+
+  // 동일 대상일 때 최종산정(node_rollup)을 부분산정(batch)보다 우선 노출
+  return (isFinalKind ? 100 : 10) + (isDone ? 2 : isPending ? 1 : 0);
+}
+
+function buildHistoryDisplayRuns(runs: PcfRunListItemDto[]): PcfRunListItemDto[] {
+  const byTarget = new Map<string, PcfRunListItemDto>();
+  for (const r of runs) {
+    const key = [
+      r.project_id,
+      r.product_id,
+      r.product_variant_id ?? "na",
+      r.reporting_year,
+      r.reporting_month,
+    ].join(":");
+    const prev = byTarget.get(key);
+    if (!prev) {
+      byTarget.set(key, r);
+      continue;
+    }
+    const prevScore = getRunPriorityScore(prev);
+    const nextScore = getRunPriorityScore(r);
+    if (nextScore > prevScore) {
+      byTarget.set(key, r);
+      continue;
+    }
+    if (nextScore === prevScore && getRunTimestampMs(r) >= getRunTimestampMs(prev)) {
+      byTarget.set(key, r);
+    }
+  }
+  return Array.from(byTarget.values()).sort((a, b) => getRunTimestampMs(b) - getRunTimestampMs(a));
 }
 
 interface ComputationTreeNode {
@@ -52,43 +156,10 @@ interface ComputationTreeNode {
   expanded?: boolean;
 }
 
-/** 협력사 포털: 조회월×티어별 PCF 단계 (브라우저 저장 — 추후 서버 산정·전송 API 연동) */
-const SUP_PCF_MONTH_RUN_KEY = 'aifix_sup_pcf_month_run_state_v1';
-
 function periodToYm(period: string): string | null {
   const m = period.match(/(\d{4})\s*년\s*(\d{1,2})\s*월/);
   if (!m) return null;
   return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, '0')}`;
-}
-
-function supPcfRunMapKey(tier: TierType, ym: string): string {
-  return `${tier}|${ym}`;
-}
-
-type SupPcfMonthStored = { partial?: boolean; final?: boolean; transmitted?: boolean };
-
-function readSupMonthRunState(tier: TierType, ym: string): SupPcfMonthStored {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = localStorage.getItem(SUP_PCF_MONTH_RUN_KEY);
-    const o = raw ? (JSON.parse(raw) as Record<string, SupPcfMonthStored>) : {};
-    return o[supPcfRunMapKey(tier, ym)] ?? {};
-  } catch {
-    return {};
-  }
-}
-
-function writeSupMonthRunState(tier: TierType, ym: string, patch: Partial<SupPcfMonthStored>): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const raw = localStorage.getItem(SUP_PCF_MONTH_RUN_KEY);
-    const o = raw ? (JSON.parse(raw) as Record<string, SupPcfMonthStored>) : {};
-    const k = supPcfRunMapKey(tier, ym);
-    o[k] = { ...o[k], ...patch };
-    localStorage.setItem(SUP_PCF_MONTH_RUN_KEY, JSON.stringify(o));
-  } catch {
-    /* ignore */
-  }
 }
 
 function defaultPreviousMonthKorean(): string {
@@ -97,24 +168,43 @@ function defaultPreviousMonthKorean(): string {
   return `${d.getFullYear()}년 ${d.getMonth() + 1}월`;
 }
 
-export function PCFCalculation({ tier }: PCFCalculationProps) {
+export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [isTransmitted, setIsTransmitted] = useState(false);
   const [lastRun, setLastRun] = useState<'none' | 'partial' | 'final'>('none');
   const [selectedPeriod, setSelectedPeriod] = useState(defaultPreviousMonthKorean);
-  const [selectedResult, setSelectedResult] = useState<string | null>(null);
+  /** PCF 계산 결과 이력 테이블에서 선택한 행 — 상세보기 패널에 그대로 반영 */
+  const [selectedHistoryItem, setSelectedHistoryItem] =
+    useState<CalculationHistoryItem | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set(["root", "supplier-group"]));
-  /** 추후 PCF 준비도 API로 대체 (원청과 동일: 자사 완료 → 부분산정, 하위까지 완료 → 최종산정) */
-  const [readinessStatus, setReadinessStatus] = useState<"complete" | "partial" | "incomplete">("partial");
+  /** `GET /pcf/readiness/supplier` — 원청 PCF 준비도와 동일한 백엔드 로직 */
+  const [supReadiness, setSupReadiness] = useState<PcfReadinessSupplierResponse | null>(null);
+  const [supReadinessLoading, setSupReadinessLoading] = useState(false);
+  const [supTransferReadiness, setSupTransferReadiness] = useState<SupPcfTransferReadinessResponse | null>(null);
+  /** `/projects/real-{id}` 만 있고 URL에 dm* 쿼리가 없을 때 `getMyProjectDetail`로 보완 (데이터관리·SupplierDetail과 동일 소스) */
+  const [resolvedProject, setResolvedProject] = useState<SupplierProject | null>(null);
+  const [resolvedProjectLoading, setResolvedProjectLoading] = useState(false);
+  const [pcfRuns, setPcfRuns] = useState<PcfRunListItemDto[]>([]);
+  const [pcfRunsLoading, setPcfRunsLoading] = useState(false);
+  const [pcfTab, setPcfTab] = useState<"calculation" | "history">("calculation");
 
   const tierName = tier === "tier1" ? "1차" : tier === "tier2" ? "2차" : "3차";
-  const hasDownstream = tier === "tier1" || tier === "tier2";
+  const isMiningSmelter = supplierType.trim() === "채굴/제련사";
+  const hasDownstream = !isMiningSmelter && (tier === "tier1" || tier === "tier2");
   const upperCompanyName = tier === "tier1" ? "원청사 A" : tier === "tier2" ? "상위 1차 협력사" : "상위 2차 협력사";
 
   const ym = periodToYm(selectedPeriod);
-  const runContext = useMemo(() => {
-    const pickInt = (...keys: string[]): number | null => {
+
+  const projectPkFromPath = useMemo(() => {
+    const m = /\/projects\/real-(\d+)/i.exec(pathname ?? "");
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, [pathname]);
+
+  useEffect(() => {
+    const pickInt = (keys: string[]): number | null => {
       for (const k of keys) {
         const v = searchParams.get(k);
         if (!v) continue;
@@ -123,15 +213,61 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
       }
       return null;
     };
-    const projectFromPath = (() => {
-      const m = /\/projects\/real-(\d+)/i.exec(pathname ?? "");
-      if (!m) return null;
-      const n = parseInt(m[1], 10);
-      return Number.isFinite(n) && n > 0 ? n : null;
+    const productFromUrl = pickInt(["productId", "dmProductId"]);
+    const variantFromUrl = pickInt(["productVariantId", "dmProductVariantId", "dmVariantId"]);
+    const fullFromUrl = productFromUrl != null && variantFromUrl != null;
+
+    if (!projectPkFromPath) {
+      setResolvedProject(null);
+      setResolvedProjectLoading(false);
+      return;
+    }
+    if (fullFromUrl) {
+      setResolvedProject(null);
+      setResolvedProjectLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setResolvedProjectLoading(true);
+    setResolvedProject(null);
+    void (async () => {
+      try {
+        await restoreSupSessionFromCookie();
+        const d = await getMyProjectDetail(projectPkFromPath);
+        if (!cancelled) setResolvedProject(d);
+      } catch {
+        if (!cancelled) setResolvedProject(null);
+      } finally {
+        if (!cancelled) setResolvedProjectLoading(false);
+      }
     })();
-    const projectId = pickInt("projectId", "dmProjectId") ?? projectFromPath;
-    const productId = pickInt("productId", "dmProductId");
-    const productVariantId = pickInt("productVariantId", "dmProductVariantId");
+    return () => {
+      cancelled = true;
+    };
+  }, [projectPkFromPath, searchParams]);
+
+  const runContext = useMemo(() => {
+    const pickInt = (keys: string[]): number | null => {
+      for (const k of keys) {
+        const v = searchParams.get(k);
+        if (!v) continue;
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return null;
+    };
+    const projectId = pickInt(["projectId"]) ?? projectPkFromPath;
+    const productId =
+      pickInt(["productId", "dmProductId"]) ??
+      (resolvedProject?.product_id != null && resolvedProject.product_id >= 1
+        ? resolvedProject.product_id
+        : null);
+    const variantFromUrl = pickInt(["productVariantId", "dmProductVariantId", "dmVariantId"]);
+    const fromDetail = resolvedProject?.product_variant_id;
+    const productVariantId =
+      variantFromUrl ??
+      (fromDetail != null && Number.isFinite(fromDetail) && fromDetail >= 1 ? fromDetail : null);
     if (!projectId || !productId || !productVariantId || !ym) return null;
     const [ys, ms] = ym.split("-");
     const reportingYear = parseInt(ys, 10);
@@ -144,183 +280,401 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
       reporting_year: reportingYear,
       reporting_month: reportingMonth,
     };
-  }, [pathname, searchParams, ym]);
+  }, [searchParams, ym, projectPkFromPath, resolvedProject]);
+
+  const loadPcfRuns = useCallback(async () => {
+    if (!runContext) {
+      setPcfRuns([]);
+      setPcfRunsLoading(false);
+      return;
+    }
+    setPcfRunsLoading(true);
+    try {
+      await restoreSupSessionFromCookie();
+      const list = await getSupPcfRuns({
+        project_id: runContext.project_id,
+        product_id: runContext.product_id,
+        product_variant_id: runContext.product_variant_id,
+        reporting_year: pcfTab === "calculation" ? runContext.reporting_year : undefined,
+        reporting_month: pcfTab === "calculation" ? runContext.reporting_month : undefined,
+        limit: 50,
+      });
+      setPcfRuns(list);
+    } catch {
+      setPcfRuns([]);
+    } finally {
+      setPcfRunsLoading(false);
+    }
+  }, [runContext, pcfTab]);
 
   useEffect(() => {
-    if (!ym) {
+    void loadPcfRuns();
+  }, [loadPcfRuns]);
+
+  useEffect(() => {
+    if (!runContext) {
+      setSupReadiness(null);
+      setSupReadinessLoading(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      setSupReadiness(null);
+      setSupReadinessLoading(true);
+      try {
+        await restoreSupSessionFromCookie();
+        const r = await getSupPcfReadiness({
+          project_id: runContext.project_id,
+          product_id: runContext.product_id,
+          product_variant_id: runContext.product_variant_id,
+          reporting_year: runContext.reporting_year,
+          reporting_month: runContext.reporting_month,
+        });
+        if (!cancelled) setSupReadiness(r);
+      } catch {
+        if (!cancelled) setSupReadiness(null);
+      } finally {
+        if (!cancelled) setSupReadinessLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [runContext]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onSession = () => {
+      if (!runContext) return;
+      void (async () => {
+        setSupReadinessLoading(true);
+        try {
+          await restoreSupSessionFromCookie();
+          const r = await getSupPcfReadiness({
+            project_id: runContext.project_id,
+            product_id: runContext.product_id,
+            product_variant_id: runContext.product_variant_id,
+            reporting_year: runContext.reporting_year,
+            reporting_month: runContext.reporting_month,
+          });
+          setSupReadiness(r);
+          await loadPcfRuns();
+        } catch {
+          setSupReadiness(null);
+        } finally {
+          setSupReadinessLoading(false);
+        }
+      })();
+    };
+    window.addEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+    return () => window.removeEventListener(AIFIXR_SESSION_UPDATED_EVENT, onSession);
+  }, [runContext, loadPcfRuns]);
+
+  useEffect(() => {
+    if (!runContext) {
       setLastRun('none');
       setIsTransmitted(false);
       return;
     }
-    const s = readSupMonthRunState(tier, ym);
-    setLastRun(s.final ? 'final' : s.partial ? 'partial' : 'none');
-    setIsTransmitted(!!s.transmitted);
-  }, [ym, tier]);
+    const isDone = (s?: string) => {
+      const v = (s || "").toLowerCase();
+      return v === "completed" || v === "success";
+    };
+    const hasFinal = pcfRuns.some((r) => isDone(r.status) && (r.run_kind || "").toLowerCase() === "node_rollup");
+    const hasPartial = pcfRuns.some((r) => isDone(r.status) && (r.run_kind || "").toLowerCase() === "batch");
+    setLastRun(hasFinal ? "final" : hasPartial ? "partial" : "none");
+  }, [runContext, pcfRuns]);
 
-  // 준비 상태에 따른 카드 데이터
-  const getReadinessCards = () => {
-    if (readinessStatus === "complete") {
-      return [
-        {
-          id: "own-data",
-          label: "자사 데이터",
-          status: "complete" as ReadinessStatus,
-          value: "완료",
-          icon: CheckCircle,
-          iconColor: "#4CAF50",
-          statusColor: "#4CAF50"
-        },
-        {
-          id: "supplier-data",
-          label: "하위 협력사 데이터",
-          status: "complete" as ReadinessStatus,
-          value: hasDownstream ? "12 / 12 완료" : "해당없음",
-          icon: CheckCircle,
-          iconColor: "#4CAF50",
-          statusColor: "#4CAF50"
-        },
-        {
-          id: "coverage",
-          label: "데이터 커버리지",
-          status: "complete" as ReadinessStatus,
-          value: "95.5%",
-          icon: BarChart3,
-          iconColor: "#00B4FF",
-          statusColor: "#00B4FF"
-        },
-        {
-          id: "dqr",
-          label: "평균 DQR",
-          status: "complete" as ReadinessStatus,
-          value: "1.6",
-          icon: Activity,
-          iconColor: "#FF9800",
-          statusColor: "#FF9800"
+  useEffect(() => {
+    if (!runContext) {
+      setSupTransferReadiness(null);
+      setIsTransmitted(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        await restoreSupSessionFromCookie();
+        const tr = await getSupPcfTransferReadiness(runContext);
+        if (!cancelled) {
+          setSupTransferReadiness(tr);
+          setIsTransmitted(Boolean(tr.already_transferred));
         }
-      ];
-    } else if (readinessStatus === "partial") {
+      } catch {
+        if (!cancelled) {
+          setSupTransferReadiness(null);
+          setIsTransmitted(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [runContext]);
+
+  /** API 기준 준비 단계 (원청 OPR readiness와 동일한 의미) */
+  const readinessStatusForUi = useMemo((): "complete" | "partial" | "incomplete" => {
+    if (!runContext) return "partial";
+    if (!supReadiness) return "incomplete";
+    if (!supReadiness.own_pcf_input_ready) return "incomplete";
+    if (supReadiness.child_total === 0 || supReadiness.all_children_shared) return "complete";
+    return "partial";
+  }, [runContext, supReadiness]);
+
+  const readinessCards = useMemo(() => {
+    type CardRow = {
+      id: string;
+      label: string;
+      status: ReadinessStatus;
+      value: string;
+      icon: typeof CheckCircle;
+      iconColor: string;
+      statusColor: string;
+    };
+    const calcStage = (() => {
+      if (lastRun === "final") {
+        return {
+          status: "complete" as ReadinessStatus,
+          value: "최종산정 완료",
+          icon: CheckCircle,
+          iconColor: "#4CAF50",
+          statusColor: "#4CAF50",
+        };
+      }
+      if (lastRun === "partial") {
+        return {
+          status: "partial" as ReadinessStatus,
+          value: "최종산정 대기",
+          icon: Clock,
+          iconColor: "#FF9800",
+          statusColor: "#FF9800",
+        };
+      }
+      return {
+        status: "partial" as ReadinessStatus,
+        value: "부분산정 대기",
+        icon: AlertCircle,
+        iconColor: "#9E9E9E",
+        statusColor: "#9E9E9E",
+      };
+    })();
+
+    if (!runContext) {
+      if (projectPkFromPath && resolvedProjectLoading) {
+        return [
+          {
+            id: "own-data",
+            label: "자사 데이터",
+            status: "partial" as ReadinessStatus,
+            value: "불러오는 중…",
+            icon: Activity,
+            iconColor: "#9E9E9E",
+            statusColor: "#9E9E9E",
+          },
+          {
+            id: "supplier-data",
+            label: "하위 협력사 데이터",
+            status: "partial" as ReadinessStatus,
+            value: "불러오는 중…",
+            icon: Activity,
+            iconColor: "#9E9E9E",
+            statusColor: "#9E9E9E",
+          },
+          {
+            id: "coverage",
+            label: "데이터 커버리지",
+            status: "partial" as ReadinessStatus,
+            value: "불러오는 중…",
+            icon: Activity,
+            iconColor: "#9E9E9E",
+            statusColor: "#9E9E9E",
+          },
+          {
+            id: "calc-stage",
+            label: "산정 상태",
+            status: calcStage.status,
+            value: calcStage.value,
+            icon: calcStage.icon,
+            iconColor: calcStage.iconColor,
+            statusColor: calcStage.statusColor,
+          },
+        ] satisfies CardRow[];
+      }
       return [
         {
           id: "own-data",
           label: "자사 데이터",
-          status: "complete" as ReadinessStatus,
-          value: "완료",
-          icon: CheckCircle,
-          iconColor: "#4CAF50",
-          statusColor: "#4CAF50"
+          status: "partial" as ReadinessStatus,
+          value: "—",
+          icon: Activity,
+          iconColor: "#9E9E9E",
+          statusColor: "#9E9E9E",
         },
         {
           id: "supplier-data",
           label: "하위 협력사 데이터",
           status: "partial" as ReadinessStatus,
-          value: hasDownstream ? "9 / 12" : "해당없음",
-          icon: AlertTriangle,
-          iconColor: "#FF9800",
-          statusColor: "#FF9800"
+          value: "—",
+          icon: Activity,
+          iconColor: "#9E9E9E",
+          statusColor: "#9E9E9E",
         },
         {
           id: "coverage",
           label: "데이터 커버리지",
-          status: "complete" as ReadinessStatus,
-          value: "95.5%",
-          icon: BarChart3,
-          iconColor: "#00B4FF",
-          statusColor: "#00B4FF"
+          status: "partial" as ReadinessStatus,
+          value: "—",
+          icon: Activity,
+          iconColor: "#9E9E9E",
+          statusColor: "#9E9E9E",
         },
         {
-          id: "dqr",
-          label: "평균 DQR",
-          status: "complete" as ReadinessStatus,
-          value: "2.1",
+          id: "calc-stage",
+          label: "산정 상태",
+          status: calcStage.status,
+          value: calcStage.value,
+          icon: calcStage.icon,
+          iconColor: calcStage.iconColor,
+          statusColor: calcStage.statusColor,
+        },
+      ] satisfies CardRow[];
+    }
+
+    if (supReadinessLoading) {
+      return [
+        {
+          id: "own-data",
+          label: "자사 데이터",
+          status: "partial" as ReadinessStatus,
+          value: "불러오는 중…",
           icon: Activity,
-          iconColor: "#F44336",
-          statusColor: "#F44336"
-        }
-      ];
-    } else {
-      // incomplete
+          iconColor: "#9E9E9E",
+          statusColor: "#9E9E9E",
+        },
+        {
+          id: "supplier-data",
+          label: "하위 협력사 데이터",
+          status: "partial" as ReadinessStatus,
+          value: "불러오는 중…",
+          icon: Activity,
+          iconColor: "#9E9E9E",
+          statusColor: "#9E9E9E",
+        },
+        {
+          id: "coverage",
+          label: "데이터 커버리지",
+          status: "partial" as ReadinessStatus,
+          value: "불러오는 중…",
+          icon: Activity,
+          iconColor: "#9E9E9E",
+          statusColor: "#9E9E9E",
+        },
+        {
+          id: "calc-stage",
+          label: "산정 상태",
+          status: calcStage.status,
+          value: calcStage.value,
+          icon: calcStage.icon,
+          iconColor: calcStage.iconColor,
+          statusColor: calcStage.statusColor,
+        },
+      ] satisfies CardRow[];
+    }
+
+    const r = supReadiness;
+    if (!r) {
       return [
         {
           id: "own-data",
           label: "자사 데이터",
           status: "incomplete" as ReadinessStatus,
-          value: "미완료",
+          value: "조회 실패",
           icon: XCircle,
           iconColor: "#F44336",
-          statusColor: "#F44336"
+          statusColor: "#F44336",
         },
         {
           id: "supplier-data",
           label: "하위 협력사 데이터",
           status: "incomplete" as ReadinessStatus,
-          value: hasDownstream ? "0 / 12" : "해당없음",
+          value: "—",
           icon: AlertTriangle,
           iconColor: "#FF9800",
-          statusColor: "#FF9800"
+          statusColor: "#FF9800",
         },
         {
           id: "coverage",
           label: "데이터 커버리지",
-          status: "complete" as ReadinessStatus,
-          value: "95.5%",
+          status: "incomplete" as ReadinessStatus,
+          value: "—",
           icon: BarChart3,
-          iconColor: "#00B4FF",
-          statusColor: "#00B4FF"
+          iconColor: "#9E9E9E",
+          statusColor: "#9E9E9E",
         },
         {
-          id: "dqr",
-          label: "평균 DQR",
-          status: "complete" as ReadinessStatus,
-          value: "-",
-          icon: Activity,
-          iconColor: "#9E9E9E",
-          statusColor: "#9E9E9E"
-        }
-      ];
+          id: "calc-stage",
+          label: "산정 상태",
+          status: calcStage.status,
+          value: calcStage.value,
+          icon: calcStage.icon,
+          iconColor: calcStage.iconColor,
+          statusColor: calcStage.statusColor,
+        },
+      ] satisfies CardRow[];
     }
-  };
 
-  const readinessCards = getReadinessCards();
+    const ownOk = r.own_pcf_input_ready;
+    const downstreamValue = `${r.child_shared_count}/${r.child_total}`;
+    const downstreamStatus: ReadinessStatus =
+      r.child_total === 0 || r.all_children_shared ? "complete" : "partial";
 
-  // PCF 계산 결과 이력
-  const calculationHistory: CalculationHistoryItem[] = [
-    {
-      id: "PCF-2625-001",
-      product: "배터리 모듈 A",
-      supplyVersion: "SCv-2026-01",
-      bomVersion: "M-BOM v2.3",
-      period: "2026-01",
-      coverage: "95.5%",
-      dqr: "1.6",
-      totalEmission: "32,420.3 kg CO₂e",
-      status: "complete",
-      date: "2026-03-04"
-    },
-    {
-      id: "PCF-2625-002",
-      product: "배터리 모듈 A",
-      supplyVersion: "SCv-2026-02",
-      bomVersion: "M-BOM v2.2",
-      period: "2026-01",
-      coverage: "92.3%",
-      dqr: "1.8",
-      totalEmission: "33,150.7 kg CO₂e",
-      status: "complete",
-      date: "2026-02-28"
-    },
-    {
-      id: "PCF-2625-003",
-      product: "전자제 셀",
-      supplyVersion: "SCv-2026-01",
-      bomVersion: "M-BOM v1.6",
-      period: "2026-01",
-      coverage: "88.5%",
-      dqr: "2.1",
-      totalEmission: "28,930.5 kg CO₂e",
-      status: "partial",
-      date: "2026-02-25"
-    }
-  ];
+    return [
+      {
+        id: "own-data",
+        label: "자사 데이터",
+        status: (ownOk ? "complete" : "incomplete") as ReadinessStatus,
+        value: ownOk ? "완료" : "미완료",
+        icon: ownOk ? CheckCircle : XCircle,
+        iconColor: ownOk ? "#4CAF50" : "#F44336",
+        statusColor: ownOk ? "#4CAF50" : "#F44336",
+      },
+      {
+        id: "supplier-data",
+        label: "하위 협력사 데이터",
+        status: downstreamStatus,
+        value: downstreamValue,
+        icon: downstreamStatus === "complete" ? CheckCircle : AlertTriangle,
+        iconColor: downstreamStatus === "complete" ? "#4CAF50" : "#FF9800",
+        statusColor: downstreamStatus === "complete" ? "#4CAF50" : "#FF9800",
+      },
+      {
+        id: "coverage",
+        label: "데이터 커버리지",
+        status: "complete" as ReadinessStatus,
+        value: `${Number(r.data_coverage_pct).toFixed(1)}%`,
+        icon: BarChart3,
+        iconColor: "#00B4FF",
+        statusColor: "#00B4FF",
+      },
+      {
+        id: "calc-stage",
+        label: "산정 상태",
+        status: calcStage.status,
+        value: calcStage.value,
+        icon: calcStage.icon,
+        iconColor: calcStage.iconColor,
+        statusColor: calcStage.statusColor,
+      },
+    ] satisfies CardRow[];
+  }, [runContext, supReadiness, supReadinessLoading, projectPkFromPath, resolvedProjectLoading, lastRun]);
+
+  const calculationHistoryRows = useMemo(() => {
+    const dqrHint =
+      supReadiness != null && Number.isFinite(Number(supReadiness.avg_dqr))
+        ? Number(supReadiness.avg_dqr).toFixed(1)
+        : null;
+    return buildHistoryDisplayRuns(pcfRuns).map((r) => mapPcfRunToHistoryItem(r, dqrHint));
+  }, [pcfRuns, supReadiness]);
 
   // 계산 트리 데이터
   const getComputationTree = (): ComputationTreeNode => {
@@ -589,27 +943,27 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
             style={{ backgroundColor: '#E8F5E9', color: '#4CAF50', fontWeight: 600 }}
           >
             <CheckCircle className="w-3.5 h-3.5" />
-            완료
+            최종산정 완료
           </span>
         );
       case "partial":
         return (
           <span 
             className="px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1"
-            style={{ backgroundColor: '#E3F2FD', color: '#2196F3', fontWeight: 600 }}
+            style={{ backgroundColor: '#FFF4E6', color: '#EF6C00', fontWeight: 600 }}
           >
             <Clock className="w-3.5 h-3.5" />
-            진행중
+            최종산정 대기
           </span>
         );
       case "processing":
         return (
           <span 
             className="px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1"
-            style={{ backgroundColor: '#FFF4E6', color: '#FF9800', fontWeight: 600 }}
+            style={{ backgroundColor: '#F5F5F5', color: '#757575', fontWeight: 600 }}
           >
-            <RefreshCw className="w-3.5 h-3.5" />
-            재산정
+            <AlertCircle className="w-3.5 h-3.5" />
+            부분산정 대기
           </span>
         );
     }
@@ -749,24 +1103,35 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
     );
   };
 
-  const ownDataReady = readinessStatus !== "incomplete";
-  const downstreamAllReady = !hasDownstream || readinessStatus === "complete";
-  const canPartialCalculate = !!ym && ownDataReady;
-  const canFinalCalculate = !!ym && ownDataReady && downstreamAllReady;
+  const canPartialCalculate =
+    !!ym &&
+    !isMiningSmelter &&
+    (!runContext
+      ? true
+      : !supReadinessLoading && !!supReadiness?.own_pcf_input_ready);
+  const canFinalCalculate =
+    !!ym &&
+    (!runContext
+      ? false
+      : !supReadinessLoading && !!supReadiness?.can_run_calculation);
   const canTransmit = lastRun === "final" && !isTransmitted;
 
   const getWarningMessage = () => {
-    if (readinessStatus === "incomplete") {
+    if (readinessStatusForUi === "incomplete") {
+      if (runContext && !supReadinessLoading && !supReadiness) {
+        return "PCF 준비도를 불러오지 못했습니다. 로그인·프로젝트 링크(제품·세부제품 쿼리)를 확인해 주세요.";
+      }
       return "PCF 산정을 위해 필요한 당사 데이터 입력이 완료되지 않았습니다.";
     }
-    if (readinessStatus === "partial" && hasDownstream) {
+    if (readinessStatusForUi === "partial" && hasDownstream) {
       return "당사 데이터는 준비되었습니다. 하위 협력사 데이터 전송이 모두 완료되기 전까지는 부분 산정(자사 데이터만)만 실행할 수 있으며, 최종 산정·상위 전송은 하위 완료 후 가능합니다.";
     }
     return null;
   };
 
   const hasWarning =
-    readinessStatus === "incomplete" || (readinessStatus === "partial" && hasDownstream);
+    readinessStatusForUi === "incomplete" ||
+    (readinessStatusForUi === "partial" && hasDownstream);
 
   const handlePartialCalculate = async () => {
     if (!ym || !canPartialCalculate) {
@@ -780,10 +1145,13 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
           calculation_mode: "partial",
         });
       }
-      writeSupMonthRunState(tier, ym, { partial: true, final: false, transmitted: false });
-      setLastRun("partial");
-      setIsTransmitted(false);
       toast.success(runContext ? "부분산정을 실행했습니다." : "부분산정을 실행합니다 (데모 모드)");
+      await loadPcfRuns();
+      if (runContext) {
+        const tr = await getSupPcfTransferReadiness(runContext);
+        setSupTransferReadiness(tr);
+        setIsTransmitted(Boolean(tr.already_transferred));
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "부분산정 실행에 실패했습니다.");
     }
@@ -801,10 +1169,13 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
           calculation_mode: "final",
         });
       }
-      writeSupMonthRunState(tier, ym, { partial: true, final: true, transmitted: false });
-      setLastRun("final");
-      setIsTransmitted(false);
       toast.success(runContext ? "최종 PCF 산정을 실행했습니다." : "최종 PCF 산정을 실행합니다 (데모 모드)");
+      await loadPcfRuns();
+      if (runContext) {
+        const tr = await getSupPcfTransferReadiness(runContext);
+        setSupTransferReadiness(tr);
+        setIsTransmitted(Boolean(tr.already_transferred));
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "최종 PCF 산정 실행에 실패했습니다.");
     }
@@ -819,17 +1190,29 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
       if (runContext) {
         await postSupPcfTransferShare(runContext);
       }
-      writeSupMonthRunState(tier, ym, { transmitted: true });
-      setIsTransmitted(true);
+      if (runContext) {
+        const tr = await getSupPcfTransferReadiness(runContext);
+        setSupTransferReadiness(tr);
+        setIsTransmitted(Boolean(tr.already_transferred));
+      } else {
+        setIsTransmitted(true);
+      }
       toast.success(runContext ? `${upperCompanyName}로 PCF 결과를 전송했습니다.` : `${upperCompanyName}로 PCF 결과를 전송했습니다 (데모 모드)`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "PCF 결과 전송에 실패했습니다.");
     }
   };
 
-  if (selectedResult) {
-    const computationTree = getComputationTree();
-    const supplierData = getSupplierData();
+  if (selectedHistoryItem) {
+    const row = selectedHistoryItem;
+    const baseTree = getComputationTree();
+    const computationTree = { ...baseTree, emission: row.totalEmission };
+    const detailSubtitle =
+      row.status === "complete"
+        ? "선택한 이력의 산정 결과입니다 (BOM·공급망 버전 기준)."
+        : row.status === "partial"
+          ? "부분 산정 결과입니다. 하위 데이터 반영 후 재산정할 수 있습니다."
+          : "산정이 진행 중입니다.";
 
     // PCF 결과 상세 페이지 (원청사 디자인 기준)
     return (
@@ -837,17 +1220,19 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
         {/* Header */}
         <div className="mb-8">
           <button
-            onClick={() => setSelectedResult(null)}
+            type="button"
+            onClick={() => setSelectedHistoryItem(null)}
             className="flex items-center gap-2 mb-4 px-4 py-2 rounded-lg transition-colors"
             style={{ color: 'var(--aifix-primary)', fontWeight: 600, border: 'none', background: 'transparent', cursor: 'pointer' }}
           >
             ← 목록으로 돌아가기
           </button>
           <h2 className="text-3xl mb-2" style={{ fontWeight: 700, color: 'var(--aifix-navy)' }}>
-            PCF 계산 결과 상세 (완료 4 조각분)
+            PCF 계산 결과 상세
+            {row.status === "complete" ? " (완료)" : row.status === "partial" ? " (부분)" : " (진행중)"}
           </h2>
           <p style={{ color: 'var(--aifix-gray)', fontSize: '14px' }}>
-            지금 정보는 완료된 4 조각 BOM 구성 + PCF 계산에 대한 결과입니다.
+            {detailSubtitle}
           </p>
         </div>
 
@@ -864,8 +1249,8 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
               <div className="w-32 flex-shrink-0" style={{ fontSize: '13px', color: 'var(--aifix-gray)' }}>
                 계산 ID
               </div>
-              <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
-                {selectedResult}
+              <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-primary)' }}>
+                {row.id}
               </div>
             </div>
             <div className="flex items-start">
@@ -873,15 +1258,18 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
                 제품
               </div>
               <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
-                배터리 모듈 A
+                {row.product}
               </div>
             </div>
             <div className="flex items-start">
               <div className="w-32 flex-shrink-0" style={{ fontSize: '13px', color: 'var(--aifix-gray)' }}>
-                공급망 버전
+                산정 유형
               </div>
               <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
-                SCv-2026-01
+                {(() => {
+                  const picked = pcfRuns.find((r) => (r.display_id?.trim() || `run-${r.id}`) === row.id);
+                  return picked ? mapApiRunKindToSupplyVersion(picked.run_kind) : "—";
+                })()}
               </div>
             </div>
             <div className="flex items-start">
@@ -889,7 +1277,7 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
                 M-BOM 버전
               </div>
               <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
-                M-BOM v2.3
+                {row.bomVersion}
               </div>
             </div>
             <div className="flex items-start">
@@ -897,7 +1285,7 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
                 산정 기간
               </div>
               <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
-                2026-01
+                {row.period}
               </div>
             </div>
             <div className="flex items-start">
@@ -905,7 +1293,15 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
                 DQR
               </div>
               <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
-                1.6
+                {row.dqr}
+              </div>
+            </div>
+            <div className="flex items-start">
+              <div className="w-32 flex-shrink-0" style={{ fontSize: '13px', color: 'var(--aifix-gray)' }}>
+                산정 상태
+              </div>
+              <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
+                {getStatusBadge(row.status)}
               </div>
             </div>
           </div>
@@ -937,7 +1333,7 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
               계산 트리 (Computation Tree)
             </h3>
             <p style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginTop: '4px' }}>
-              ※ 제품 단위별 배출 기여도를 트리 구조로 표현합니다
+              ※ 제품 단위별 배출 기여도를 트리 구조로 표현합니다 (하위 구성은 티어 데모 구조입니다).
             </p>
           </div>
 
@@ -959,10 +1355,10 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
               style={{ backgroundColor: '#E3F2FD' }}
             >
               <div style={{ fontSize: '12px', color: '#1976D2', marginBottom: '8px', fontWeight: 600 }}>
-                데이터 커버리지
+                kg 기준 PCF
               </div>
               <div className="text-3xl mb-1" style={{ fontWeight: 700, color: '#1565C0' }}>
-                95.5%
+                {row.kgBasedPcf}
               </div>
             </div>
 
@@ -974,7 +1370,7 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
                 평균 DQR
               </div>
               <div className="text-3xl mb-1" style={{ fontWeight: 700, color: '#EF6C00' }}>
-                1.6
+                {row.dqr}
               </div>
             </div>
 
@@ -1028,27 +1424,21 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
               <tbody>
                 <tr style={{ borderBottom: '1px solid #F0F0F0' }}>
                   <td className="py-3 px-4" style={{ fontSize: '14px', fontWeight: 500, color: 'var(--aifix-navy)' }}>
-                    2024-03-04 16:23:15
+                    {row.date} 09:00:00
                   </td>
                   <td className="py-3 px-4" style={{ fontSize: '14px', color: 'var(--aifix-navy)' }}>
-                    김철수
+                    시스템
                   </td>
                   <td className="py-3 px-4">
                     <span className="px-2 py-1 rounded text-xs" style={{ backgroundColor: 'var(--aifix-primary-light)', color: 'var(--aifix-primary)', fontWeight: 600 }}>
-                      v1.2
+                      {row.bomVersion}
                     </span>
                   </td>
                   <td className="py-3 px-4">
-                    <span 
-                      className="px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1"
-                      style={{ backgroundColor: '#E8F5E9', color: '#4CAF50', fontWeight: 600 }}
-                    >
-                      <CheckCircle className="w-3.5 h-3.5" />
-                      완료
-                    </span>
+                    {getStatusBadge(row.status)}
                   </td>
                   <td className="py-3 px-4" style={{ fontSize: '13px', color: 'var(--aifix-gray)' }}>
-                    최초 계산
+                    이력 기준 산정
                   </td>
                 </tr>
                 <tr style={{ borderBottom: '1px solid #F0F0F0' }}>
@@ -1122,8 +1512,42 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
         <p style={{ color: 'var(--aifix-gray)' }}>
           자사 및 하위 협력사 데이터를 기반으로 PCF를 계산합니다
         </p>
+        <div className="mt-6 border-b" style={{ borderColor: "#E5E7EB" }}>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPcfTab("calculation")}
+              className="px-4 py-3 transition-all inline-flex items-center gap-2 border-b-2"
+              style={{
+                borderBottomColor: pcfTab === "calculation" ? "#00B4FF" : "transparent",
+                color: pcfTab === "calculation" ? "#00B4FF" : "var(--aifix-gray)",
+                fontWeight: 700,
+                fontSize: "15px",
+              }}
+            >
+              <FileText className="w-4 h-4" />
+              계산
+            </button>
+            <button
+              type="button"
+              onClick={() => setPcfTab("history")}
+              className="px-4 py-3 transition-all inline-flex items-center gap-2 border-b-2"
+              style={{
+                borderBottomColor: pcfTab === "history" ? "#00B4FF" : "transparent",
+                color: pcfTab === "history" ? "#00B4FF" : "var(--aifix-gray)",
+                fontWeight: 700,
+                fontSize: "15px",
+              }}
+            >
+              <Clock className="w-4 h-4" />
+              히스토리
+            </button>
+          </div>
+        </div>
       </div>
 
+      {pcfTab === "calculation" && (
+      <>
       {/* 1. PCF 산정 대상 선택 */}
       <div 
         className="bg-white rounded-[20px] p-6 mb-6"
@@ -1191,22 +1615,7 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
         </div>
 
         <p style={{ fontSize: '12px', color: 'var(--aifix-gray)', marginBottom: '12px', lineHeight: 1.5 }}>
-          원청사 PCF 화면과 동일하게, 월별로 자사 데이터만으로 부분 산정을 할 수 있고 하위 협력사 데이터 전송이 모두 완료되면 최종 산정 후 상위로 전송할 수 있습니다. 아래 준비도는 추후 API 연동 시 자동 반영됩니다.
-          {hasDownstream && (
-            <>
-              {' '}
-              <button
-                type="button"
-                onClick={() =>
-                  setReadinessStatus((s) => (s === 'complete' ? 'partial' : 'complete'))
-                }
-                className="underline decoration-dotted underline-offset-2"
-                style={{ color: '#00838F', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
-              >
-                (데모) 하위 전송 {readinessStatus === 'complete' ? '미완' : '완료'}으로 전환
-              </button>
-            </>
-          )}
+          원청 PCF와 동일한 API(`/pcf/readiness/supplier`)로 표시합니다. URL에 제품·세부제품 쿼리가 없어도 현재 프로젝트(`/projects/real-…`)의 계약 정보(`getMyProjectDetail`)로 조회합니다. 하위 협력사가 없으면 0/0으로 보입니다.
         </p>
 
         {hasWarning && getWarningMessage() && (
@@ -1290,6 +1699,8 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
           )}
         </div>
       </div>
+      </>
+      )}
 
       {/* 3. PCF 계산 결과 이력 */}
       <div 
@@ -1343,19 +1754,16 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
                   제품
                 </th>
                 <th className="text-left py-3 px-4" style={{ fontSize: '13px', fontWeight: 600, color: 'var(--aifix-gray)' }}>
-                  공급망 버전
-                </th>
-                <th className="text-left py-3 px-4" style={{ fontSize: '13px', fontWeight: 600, color: 'var(--aifix-gray)' }}>
                   BOM 버전
                 </th>
                 <th className="text-left py-3 px-4" style={{ fontSize: '13px', fontWeight: 600, color: 'var(--aifix-gray)' }}>
                   산정 기간
                 </th>
                 <th className="text-left py-3 px-4" style={{ fontSize: '13px', fontWeight: 600, color: 'var(--aifix-gray)' }}>
-                  데이터 커버리지
+                  총 배출량
                 </th>
                 <th className="text-left py-3 px-4" style={{ fontSize: '13px', fontWeight: 600, color: 'var(--aifix-gray)' }}>
-                  총 배출량
+                  kg 기준 PCF
                 </th>
                 <th className="text-left py-3 px-4" style={{ fontSize: '13px', fontWeight: 600, color: 'var(--aifix-gray)' }}>
                   산정 상태
@@ -1366,65 +1774,83 @@ export function PCFCalculation({ tier }: PCFCalculationProps) {
               </tr>
             </thead>
             <tbody>
-              {calculationHistory.map((item) => (
-                <tr key={item.id} style={{ borderBottom: '1px solid #F0F0F0' }}>
-                  <td className="py-3 px-4">
-                    <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-primary)' }}>
-                      {item.id}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4" style={{ fontSize: '14px', fontWeight: 500, color: 'var(--aifix-navy)' }}>
-                    {item.product}
-                  </td>
-                  <td className="py-3 px-4" style={{ fontSize: '13px', color: 'var(--aifix-navy)' }}>
-                    {item.supplyVersion}
-                  </td>
-                  <td className="py-3 px-4" style={{ fontSize: '13px', color: 'var(--aifix-navy)' }}>
-                    {item.bomVersion}
-                  </td>
-                  <td className="py-3 px-4" style={{ fontSize: '13px', color: 'var(--aifix-navy)' }}>
-                    {item.period}
-                  </td>
-                  <td className="py-3 px-4">
-                    <span style={{ fontSize: '14px', fontWeight: 600, color: '#00B4FF' }}>
-                      {item.coverage}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4" style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
-                    {item.totalEmission}
-                  </td>
-                  <td className="py-3 px-4">
-                    {getStatusBadge(item.status)}
-                  </td>
-                  <td className="py-3 px-4">
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => setSelectedResult(item.id)}
-                        className="px-3 py-1.5 rounded-lg text-xs transition-colors"
-                        style={{
-                          border: '1px solid var(--aifix-primary)',
-                          color: 'var(--aifix-primary)',
-                          fontWeight: 600,
-                          backgroundColor: 'white'
-                        }}
-                      >
-                        상세보기
-                      </button>
-                      <button
-                        className="px-3 py-1.5 rounded-lg text-xs transition-colors"
-                        style={{
-                          border: '1px solid #BDBDBD',
-                          color: '#616161',
-                          fontWeight: 600,
-                          backgroundColor: 'white'
-                        }}
-                      >
-                        재산정
-                      </button>
-                    </div>
+              {pcfRunsLoading ? (
+                <tr>
+                  <td colSpan={8} className="py-8 px-4 text-center" style={{ fontSize: '14px', color: 'var(--aifix-gray)' }}>
+                    PCF 산정 이력을 불러오는 중입니다…
                   </td>
                 </tr>
-              ))}
+              ) : !runContext ? (
+                <tr>
+                  <td colSpan={8} className="py-8 px-4 text-center" style={{ fontSize: '14px', color: 'var(--aifix-gray)' }}>
+                    프로젝트·제품·세부제품·산정 기간이 모두 맞으면 서버에 저장된 산정 이력이 여기에 표시됩니다. URL에 제품/세부제품 파라미터를 확인해 주세요.
+                  </td>
+                </tr>
+              ) : calculationHistoryRows.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-8 px-4 text-center" style={{ fontSize: '14px', color: 'var(--aifix-gray)' }}>
+                    {pcfTab === "history"
+                      ? "등록된 PCF 산정 이력이 없습니다. 부분·최종 산정을 실행하면 목록에 추가됩니다."
+                      : "선택한 기간에 등록된 PCF 산정 이력이 없습니다. 부분·최종 산정을 실행하면 목록에 추가됩니다."}
+                  </td>
+                </tr>
+              ) : (
+                calculationHistoryRows.map((item, idx) => (
+                  <tr key={`${item.id}-${item.date}-${idx}`} style={{ borderBottom: '1px solid #F0F0F0' }}>
+                    <td className="py-3 px-4">
+                      <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-primary)' }}>
+                        {item.id}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4" style={{ fontSize: '14px', fontWeight: 500, color: 'var(--aifix-navy)' }}>
+                      {item.product}
+                    </td>
+                    <td className="py-3 px-4" style={{ fontSize: '13px', color: 'var(--aifix-navy)' }}>
+                      {item.bomVersion}
+                    </td>
+                    <td className="py-3 px-4" style={{ fontSize: '13px', color: 'var(--aifix-navy)' }}>
+                      {item.period}
+                    </td>
+                    <td className="py-3 px-4" style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
+                      {item.totalEmission}
+                    </td>
+                    <td className="py-3 px-4" style={{ fontSize: '14px', fontWeight: 600, color: 'var(--aifix-navy)' }}>
+                      {item.kgBasedPcf}
+                    </td>
+                    <td className="py-3 px-4">
+                      {getStatusBadge(item.status)}
+                    </td>
+                    <td className="py-3 px-4">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedHistoryItem(item)}
+                          className="px-3 py-1.5 rounded-lg text-xs transition-colors"
+                          style={{
+                            border: '1px solid var(--aifix-primary)',
+                            color: 'var(--aifix-primary)',
+                            fontWeight: 600,
+                            backgroundColor: 'white'
+                          }}
+                        >
+                          상세보기
+                        </button>
+                        <button
+                          className="px-3 py-1.5 rounded-lg text-xs transition-colors"
+                          style={{
+                            border: '1px solid #BDBDBD',
+                            color: '#616161',
+                            fontWeight: 600,
+                            backgroundColor: 'white'
+                          }}
+                        >
+                          재산정
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>

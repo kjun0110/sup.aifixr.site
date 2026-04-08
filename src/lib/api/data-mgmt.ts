@@ -158,6 +158,40 @@ export async function putSupDataMgmtMonthlySave(p: {
   });
 }
 
+/** GET .../detail — 월별 저장된 납품·자재·에너지·운송 (product_variant_id 필수) */
+export type SupMonthlyDetailResponse = {
+  project_id: number;
+  product_id: number;
+  supplier_id: number;
+  reporting_year: number;
+  reporting_month: number;
+  readonly_identity: {
+    company_name?: string | null;
+    business_reg_no?: string | null;
+    country?: string | null;
+    note?: string;
+  };
+  editable_hint?: unknown | null;
+  delivered_row: Record<string, unknown> | null;
+  material_rows: Record<string, unknown>[];
+  energy_rows: Record<string, unknown>[];
+  transport_rows: Record<string, unknown>[];
+};
+
+export async function getSupDataMgmtMonthlyDetail(p: {
+  projectId: number;
+  productId: number;
+  supplierId: number;
+  reportingYear: number;
+  reportingMonth: number;
+  productVariantId: number;
+}): Promise<SupMonthlyDetailResponse> {
+  const q = new URLSearchParams();
+  q.set("product_variant_id", String(p.productVariantId));
+  const path = `${DATA_MGMT_BASE}/sup/projects/${p.projectId}/products/${p.productId}/suppliers/${p.supplierId}/months/${p.reportingYear}/${p.reportingMonth}/detail?${q.toString()}`;
+  return apiFetch<SupMonthlyDetailResponse>(path, { method: "GET" });
+}
+
 /** Tier0/협력사 export.xlsx — `import-preview` 응답 (snake_case) */
 export type SupImportPreviewWorkplaceContact = {
   site_name?: string;
@@ -198,6 +232,8 @@ export type SupImportPreviewEnergy = {
 export type SupImportPreviewProduction = {
   detail_product_name?: string;
   site_name?: string;
+  /** 협력사 생산 시트 납품일: 조회 월의 일(1~31) */
+  delivery_day?: string;
   production_qty?: string;
   production_qty_unit?: string;
   product_unit_capacity_kg?: string;

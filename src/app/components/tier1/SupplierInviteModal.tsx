@@ -25,7 +25,7 @@ import {
   type InvitationHistoryItem,
   type SupInvitePayload,
 } from "@/lib/api/invitation";
-import { actorStorageKey, AIFIXR_SESSION_UPDATED_EVENT } from "@/lib/api/client";
+import { AIFIXR_SESSION_UPDATED_EVENT } from "@/lib/api/client";
 import { approveSignupRequest, rejectSignupRequest } from "@/lib/api/signup-review";
 import {
   SUP_PENDING_INVITE_SEND_STORAGE_KEY,
@@ -245,9 +245,6 @@ export function SupplierInviteModal({
       sessionStorage.removeItem(SUP_PENDING_INVITE_SEND_STORAGE_KEY);
       return;
     }
-
-    /* 초대 API는 X-Actor-User-Id 필수 — 원청 Invite와 동일하게 세션 준비 후에만 재발송 */
-    if (!localStorage.getItem(actorStorageKey())?.trim()) return;
 
     inviteResumeInFlightRef.current = true;
     setSendInvitesLoading(true);

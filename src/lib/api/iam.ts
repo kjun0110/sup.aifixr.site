@@ -1,4 +1,4 @@
-import { apiFetch, apiUrl, actorStorageKey, AIFIXR_SESSION_UPDATED_EVENT } from "./client";
+import { apiFetch, apiUrl, AIFIXR_SESSION_UPDATED_EVENT } from "./client";
 import { setSupAccessToken } from "./sessionAccessToken";
 import { API_PREFIX, PATH_AUTH_SUP_LOGIN } from "./paths";
 
@@ -114,7 +114,6 @@ export async function login(
   const data = (await res.json()) as SupLoginResponse;
   if (typeof window !== "undefined") {
     setSupAccessToken(data.accessToken);
-    localStorage.setItem(actorStorageKey(), data.user.id);
     localStorage.setItem("user_id", data.user.id);
     localStorage.setItem("user_type", data.user.userType);
     localStorage.setItem("sup_user_email", data.user.email);

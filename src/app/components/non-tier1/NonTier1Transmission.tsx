@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { 
   CheckCircle, 
   AlertCircle, 
@@ -9,33 +9,274 @@ import {
   FileText,
   Users,
   Calculator,
-  Package
+  Package,
+  X,
 } from "lucide-react";
+import { toast } from "sonner";
 import { MonthPicker } from "../MonthPicker";
+import { usePathname, useSearchParams } from "next/navigation";
+import { restoreSupSessionFromCookie } from "@/lib/api/client";
+import { getMyProjectDetail, type SupplierProject } from "@/lib/api/supply-chain";
+import {
+  getSupPcfRuns,
+  getSupPcfTransferReadiness,
+  postSupPcfTransferShare,
+  type PcfRunListItemDto,
+  type SupPcfTransferReadinessResponse,
+} from "@/lib/api/pcf";
 
 type NonTier1TransmissionProps = {
   tier: "tier2" | "tier3";
 };
 
+function periodToYm(period: string): string | null {
+  const m = period.match(/(\d{4})\s*년\s*(\d{1,2})\s*월/);
+  if (!m) return null;
+  return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, "0")}`;
+}
+
+function isRunCompleted(r: PcfRunListItemDto): boolean {
+  const s = (r.status ?? "").toLowerCase();
+  return s === "completed" || s === "success";
+}
+
+function isPartialRun(r: PcfRunListItemDto): boolean {
+  return (r.run_kind ?? "").toLowerCase() === "batch";
+}
+
+function isFinalRun(r: PcfRunListItemDto): boolean {
+  return (r.run_kind ?? "").toLowerCase() === "node_rollup";
+}
+
 export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
   const tierName = tier === "tier2" ? "2차" : "3차";
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [selectedPeriod, setSelectedPeriod] = useState("2026년 1월");
+  const [showTransmitModal, setShowTransmitModal] = useState(false);
+  const [hasDirectRequest, setHasDirectRequest] = useState(false);
+  const [partialPcfCalculated, setPartialPcfCalculated] = useState(false);
+  const [finalPcfCalculated, setFinalPcfCalculated] = useState(false);
+  const [isTransmitted, setIsTransmitted] = useState(false);
+  const [transmitting, setTransmitting] = useState(false);
+  const [readinessLoading, setReadinessLoading] = useState(false);
+  const [readiness, setReadiness] = useState<SupPcfTransferReadinessResponse | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [selectedResultKind, setSelectedResultKind] = useState<"partial" | "final" | null>(null);
+  const [resolvedProject, setResolvedProject] = useState<SupplierProject | null>(null);
 
-  // Mock 데이터 준비 상태 (2차/3차는 다른 상태 예시)
-  const [ownDataStatus] = useState<"complete" | "incomplete" | "pending">(
-    tier === "tier2" ? "complete" : "pending"
-  );
-  const [supplierDataStatus] = useState<"complete" | "incomplete" | "partial">(
-    tier === "tier2" ? "partial" : "incomplete"
-  );
-  const [pcfStatus] = useState<"complete" | "incomplete" | "pending">(
-    tier === "tier2" ? "complete" : "incomplete"
-  );
+  const ownDataStatus: "complete" | "incomplete" | "pending" =
+    readinessLoading ? "pending" : readiness?.own_pcf_input_ready ? "complete" : "incomplete";
+  const supplierDataStatus: "complete" | "incomplete" | "partial" =
+    readinessLoading
+      ? "partial"
+      : readiness?.all_children_transferred
+        ? "complete"
+        : "incomplete";
+  const pcfStatus: "complete" | "incomplete" | "pending" = finalPcfCalculated ? "complete" : "pending";
+  const totalChildren = readiness?.child_total ?? 0;
+  const completedChildren = readiness?.child_transferred_count ?? 0;
+  const pendingChildren = Math.max(totalChildren - completedChildren, 0);
 
-  // 전송 가능 여부 판단
-  const canTransmit = ownDataStatus === "complete" && 
-                       supplierDataStatus === "complete" && 
-                       pcfStatus === "complete";
+  const canOpenTransmitModal = ownDataStatus === "complete" && supplierDataStatus === "complete";
+  const canSelectPartial = hasDirectRequest && partialPcfCalculated;
+  const canSelectFinal = finalPcfCalculated;
+  const ym = periodToYm(selectedPeriod);
+
+  const runContext = useMemo(() => {
+    const pickInt = (keys: string[]): number | null => {
+      for (const key of keys) {
+        const raw = searchParams.get(key);
+        if (!raw) continue;
+        const n = parseInt(raw, 10);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return null;
+    };
+    const projectPk = (() => {
+      const m = /\/projects\/real-(\d+)/i.exec(pathname ?? "");
+      if (!m) return null;
+      const n = parseInt(m[1], 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })();
+    const projectId =
+      pickInt(["projectId", "project_id", "dmProjectId"]) ??
+      resolvedProject?.project_id ??
+      projectPk;
+    const productId =
+      pickInt(["productId", "product_id", "dmProductId"]) ??
+      (resolvedProject?.product_id ?? null);
+    const productVariantId =
+      pickInt(["productVariantId", "product_variant_id", "dmProductVariantId", "dmVariantId"]) ??
+      (resolvedProject?.product_variant_id ?? null);
+    if (!projectId || !productId || !productVariantId || !ym) return null;
+    const [ys, ms] = ym.split("-");
+    const reportingYear = parseInt(ys, 10);
+    const reportingMonth = parseInt(ms, 10);
+    if (!Number.isFinite(reportingYear) || !Number.isFinite(reportingMonth)) return null;
+    return {
+      project_id: projectId,
+      product_id: productId,
+      product_variant_id: productVariantId,
+      reporting_year: reportingYear,
+      reporting_month: reportingMonth,
+    };
+  }, [pathname, searchParams, resolvedProject, ym]);
+
+  useEffect(() => {
+    const pickInt = (keys: string[]): number | null => {
+      for (const key of keys) {
+        const raw = searchParams.get(key);
+        if (!raw) continue;
+        const n = parseInt(raw, 10);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return null;
+    };
+    const fromPath = (() => {
+      const m = /\/projects\/real-(\d+)/i.exec(pathname ?? "");
+      if (!m) return null;
+      const n = parseInt(m[1], 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })();
+    const hasFullContext =
+      pickInt(["productId", "product_id", "dmProductId"]) != null &&
+      pickInt(["productVariantId", "product_variant_id", "dmProductVariantId", "dmVariantId"]) != null;
+    if (!fromPath || hasFullContext) {
+      setResolvedProject(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        await restoreSupSessionFromCookie();
+        const d = await getMyProjectDetail(fromPath);
+        if (!cancelled) setResolvedProject(d);
+      } catch {
+        if (!cancelled) setResolvedProject(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pathname, searchParams]);
+
+  useEffect(() => {
+    if (!runContext) {
+      setPartialPcfCalculated(false);
+      setFinalPcfCalculated(false);
+      setIsTransmitted(false);
+      setHasDirectRequest(false);
+      setReadiness(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        setReadinessLoading(true);
+        setLoadError(null);
+        await restoreSupSessionFromCookie();
+        const [runRows, transferReadiness] = await Promise.all([
+          getSupPcfRuns({
+            project_id: runContext.project_id,
+            product_id: runContext.product_id,
+            product_variant_id: runContext.product_variant_id,
+            reporting_year: runContext.reporting_year,
+            reporting_month: runContext.reporting_month,
+            limit: 100,
+            offset: 0,
+          }),
+          getSupPcfTransferReadiness(runContext),
+        ]);
+        if (cancelled) return;
+        const partialDone = runRows.some((r) => isRunCompleted(r) && isPartialRun(r));
+        const finalDone = runRows.some((r) => isRunCompleted(r) && isFinalRun(r));
+        setPartialPcfCalculated(partialDone);
+        setFinalPcfCalculated(finalDone);
+        setIsTransmitted(Boolean(transferReadiness.already_transferred));
+        setHasDirectRequest(Boolean(transferReadiness.has_direct_request_pending));
+        setReadiness(transferReadiness);
+      } catch (e) {
+        if (cancelled) return;
+        setPartialPcfCalculated(false);
+        setFinalPcfCalculated(false);
+        setIsTransmitted(false);
+        setHasDirectRequest(false);
+        setReadiness(null);
+        setLoadError(e instanceof Error ? e.message : "전송 준비 상태를 불러오지 못했습니다.");
+      } finally {
+        if (!cancelled) setReadinessLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [runContext]);
+
+  const openTransmitModal = () => {
+    if (!canOpenTransmitModal) return;
+    if (!hasDirectRequest) {
+      void submitTransmitDirectFinal();
+      return;
+    }
+    setSelectedResultKind(canSelectPartial ? "partial" : (canSelectFinal ? "final" : null));
+    setShowTransmitModal(true);
+  };
+
+  const submitTransmitDirectFinal = async () => {
+    if (!runContext) {
+      toast.error("전송에 필요한 프로젝트/제품/기간 정보가 없습니다.");
+      return;
+    }
+    if (!canSelectFinal) {
+      toast.error("최종 PCF 산정 완료 후 전송할 수 있습니다.");
+      return;
+    }
+    try {
+      setTransmitting(true);
+      await restoreSupSessionFromCookie();
+      await postSupPcfTransferShare({ ...runContext, result_kind: "final" });
+      setIsTransmitted(true);
+      toast.success("전송되었습니다");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "전송에 실패했습니다.");
+    } finally {
+      setTransmitting(false);
+    }
+  };
+
+  const submitTransmit = () => {
+    void (async () => {
+      if (!runContext) {
+        toast.error("전송에 필요한 프로젝트/제품/기간 정보가 없습니다.");
+        return;
+      }
+      if (!selectedResultKind) {
+        toast.error("전송할 결과 유형을 선택해주세요.");
+        return;
+      }
+      if (selectedResultKind === "final" && !canSelectFinal) {
+        toast.error("최종 PCF 산정 완료 후에만 최종산정 결과를 전송할 수 있습니다.");
+        return;
+      }
+      if (selectedResultKind === "partial" && !canSelectPartial) {
+        toast.error("부분 PCF 산정 완료 후에만 부분산정 결과를 전송할 수 있습니다.");
+        return;
+      }
+      try {
+        setTransmitting(true);
+        await restoreSupSessionFromCookie();
+        await postSupPcfTransferShare({ ...runContext, result_kind: selectedResultKind });
+        setIsTransmitted(true);
+        toast.success("전송되었습니다");
+        setShowTransmitModal(false);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "전송에 실패했습니다.");
+      } finally {
+        setTransmitting(false);
+      }
+    })();
+  };
 
   // 상태별 UI 설정
   const getStatusConfig = (status: string) => {
@@ -172,39 +413,20 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
               </span>
             </div>
 
-            {supplierDataStatus === "partial" && (
-              <div className="mb-3 p-3 rounded-lg" style={{ backgroundColor: '#F8F9FB' }}>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <span style={{ color: 'var(--aifix-gray)' }}>전체 협력사</span>
-                  <span style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>5개</span>
-                </div>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <span style={{ color: 'var(--aifix-gray)' }}>검토 완료</span>
-                  <span style={{ fontWeight: 600, color: 'var(--aifix-success)' }}>3개</span>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span style={{ color: 'var(--aifix-gray)' }}>검토 필요</span>
-                  <span style={{ fontWeight: 600, color: '#EF4444' }}>2개</span>
-                </div>
+            <div className="mb-3 p-3 rounded-lg" style={{ backgroundColor: '#F8F9FB' }}>
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span style={{ color: 'var(--aifix-gray)' }}>전체 협력사(직하위)</span>
+                <span style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>{totalChildren}개</span>
               </div>
-            )}
-
-            {supplierDataStatus === "incomplete" && (
-              <div className="mb-3 p-3 rounded-lg" style={{ backgroundColor: '#F8F9FB' }}>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <span style={{ color: 'var(--aifix-gray)' }}>전체 협력사</span>
-                  <span style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>3개</span>
-                </div>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <span style={{ color: 'var(--aifix-gray)' }}>검토 완료</span>
-                  <span style={{ fontWeight: 600, color: 'var(--aifix-success)' }}>0개</span>
-                </div>
-                <div className="flex items-center justify-between text-xs">
-                  <span style={{ color: 'var(--aifix-gray)' }}>검토 필요</span>
-                  <span style={{ fontWeight: 600, color: '#EF4444' }}>3개</span>
-                </div>
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span style={{ color: 'var(--aifix-gray)' }}>검토 완료</span>
+                <span style={{ fontWeight: 600, color: 'var(--aifix-success)' }}>{completedChildren}개</span>
               </div>
-            )}
+              <div className="flex items-center justify-between text-xs">
+                <span style={{ color: 'var(--aifix-gray)' }}>검토 필요</span>
+                <span style={{ fontWeight: 600, color: 'var(--aifix-gray)' }}>{pendingChildren}개</span>
+              </div>
+            </div>
 
             <p style={{ fontSize: '14px', color: 'var(--aifix-gray)', lineHeight: 1.6 }}>
               {supplierDataStatus === "complete" ? (
@@ -301,30 +523,136 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
       >
         <div className="text-center">
           <button
-            disabled={!canTransmit}
+            disabled={!canOpenTransmitModal || transmitting}
+            onClick={openTransmitModal}
             className="px-8 py-4 rounded-xl transition-all flex items-center gap-3 mx-auto"
             style={{
-              background: canTransmit 
+              background: canOpenTransmitModal 
                 ? 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)'
                 : '#E5E7EB',
-              color: canTransmit ? 'white' : '#9CA3AF',
+              color: canOpenTransmitModal ? 'white' : '#9CA3AF',
               fontWeight: 600,
               fontSize: '16px',
-              cursor: canTransmit ? 'pointer' : 'not-allowed',
-              boxShadow: canTransmit ? '0px 4px 12px rgba(91, 59, 250, 0.2)' : 'none'
+              cursor: canOpenTransmitModal ? 'pointer' : 'not-allowed',
+              boxShadow: canOpenTransmitModal ? '0px 4px 12px rgba(91, 59, 250, 0.2)' : 'none'
             }}
           >
             <Send className="w-5 h-5" />
-            상위차사에게 데이터 전송
+            {transmitting ? "전송 중..." : "상위차사에게 데이터 전송"}
           </button>
           
-          {!canTransmit && (
+          {!canOpenTransmitModal && (
             <p className="mt-4" style={{ fontSize: '14px', color: 'var(--aifix-gray)' }}>
-              모든 데이터 준비가 완료되면 전송이 가능합니다.
+              자사/하위 협력사 데이터 준비 완료 후 전송 항목을 선택할 수 있습니다.
+            </p>
+          )}
+          {loadError && (
+            <p className="mt-2" style={{ fontSize: "13px", color: "#EF4444" }}>
+              {loadError}
             </p>
           )}
         </div>
       </div>
+
+      {showTransmitModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setShowTransmitModal(false)}
+        >
+          <div
+            className="w-full max-w-xl rounded-2xl bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">상위차사 데이터 전송</h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  전송할 결과 유형을 선택하세요.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                onClick={() => setShowTransmitModal(false)}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="px-6 py-5 space-y-3">
+              {hasDirectRequest && (
+                <label className="flex items-start gap-3 rounded-xl border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                  <input
+                    type="radio"
+                    name="transfer-result-kind"
+                    className="mt-0.5"
+                    disabled={!canSelectPartial}
+                    checked={selectedResultKind === "partial"}
+                    onChange={() => setSelectedResultKind("partial")}
+                  />
+                  <div>
+                    <p className={`text-sm font-semibold ${canSelectPartial ? "text-gray-900" : "text-gray-400"}`}>
+                      PCF 부분산정 결과 및 데이터
+                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      직접요청을 받은 경우 부분산정 결과만으로 상위차사 전송이 가능합니다.
+                    </p>
+                    {!canSelectPartial && (
+                      <p className="text-xs text-amber-600 mt-1">부분 PCF 산정 완료 후 선택 가능합니다.</p>
+                    )}
+                  </div>
+                </label>
+              )}
+
+              <label className="flex items-start gap-3 rounded-xl border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                <input
+                  type="radio"
+                  name="transfer-result-kind"
+                  className="mt-0.5"
+                  disabled={!canSelectFinal}
+                  checked={selectedResultKind === "final"}
+                  onChange={() => setSelectedResultKind("final")}
+                />
+                <div>
+                  <p className={`text-sm font-semibold ${canSelectFinal ? "text-gray-900" : "text-gray-400"}`}>
+                    PCF 최종산정 결과 및 데이터
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    기본 전송 규칙입니다. 최종 산정 완료 후 전송할 수 있습니다.
+                  </p>
+                  {!canSelectFinal && (
+                    <p className="text-xs text-amber-600 mt-1">최종 PCF 산정 완료 후 선택 가능합니다.</p>
+                  )}
+                </div>
+              </label>
+
+              {!hasDirectRequest && (
+                <p className="rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-700">
+                  직접요청 미수신 상태에서는 최종산정 결과 전송만 가능합니다.
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-gray-200 px-6 py-4">
+              <button
+                type="button"
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm hover:bg-gray-50"
+                onClick={() => setShowTransmitModal(false)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                disabled={transmitting}
+                className="rounded-lg bg-[#5B3BFA] px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
+                onClick={submitTransmit}
+              >
+                {transmitting ? "전송 중..." : "선택 항목 전송"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );

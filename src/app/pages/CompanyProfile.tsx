@@ -39,8 +39,8 @@ const PROFILE_TD = 'border border-gray-300 py-4 px-4 align-top text-sm text-[var
 const PROFILE_TD_LABEL =
   'border border-gray-300 bg-[#F9FAFB] py-4 px-4 align-top text-sm font-medium text-[var(--aifix-gray)]';
 
-/** 회사 프로필·백엔드 `supplier_type`에 저장되는 공급자 유형 (4택1) */
-const SUPPLIER_TYPE_SMELTER = '가공사/제련사' as const;
+/** 회사 프로필·백엔드 `supplier_type`에 저장되는 공급자 유형 (3택1) */
+const SUPPLIER_TYPE_MINING_SMELTER = '채굴/제련사' as const;
 
 const SUPPLIER_TYPE_OPTIONS: { value: string; title: string; hint: string }[] = [
   {
@@ -49,24 +49,19 @@ const SUPPLIER_TYPE_OPTIONS: { value: string; title: string; hint: string }[] = 
     hint: '원료·부품을 가공·조립해 제품을 만드는 사업자 (예: 양극재 제조, 셀 조립)',
   },
   {
-    value: SUPPLIER_TYPE_SMELTER,
-    title: '가공사/제련사',
-    hint: '광물을 제련·정제하거나 전구체 등을 가공하는 사업자 (예: 리튬 제련, 전구체 가공)',
+    value: '가공사',
+    title: '가공사',
+    hint: '원료를 가공해 중간재를 만드는 사업자 (예: 전구체 가공, 소재 가공)',
   },
   {
-    value: '유통/물류',
-    title: '유통/물류',
-    hint: '직접 생산 없이 유통·물류만 담당하는 사업자 (예: 화학 유통, 물류센터)',
-  },
-  {
-    value: '채굴사',
-    title: '채굴사',
-    hint: '천연자원을 직접 채굴하는 사업자 (예: 리튬·니켈 광산)',
+    value: SUPPLIER_TYPE_MINING_SMELTER,
+    title: '채굴/제련사',
+    hint: '천연자원 채굴 또는 제련을 수행하는 사업자 (예: 리튬·니켈 광산, 제련소)',
   },
 ];
 
 function isSmelterSupplierType(supplierType: string): boolean {
-  return supplierType.trim() === SUPPLIER_TYPE_SMELTER;
+  return supplierType.trim() === SUPPLIER_TYPE_MINING_SMELTER;
 }
 
 function isKnownSupplierType(supplierType: string): boolean {
@@ -81,7 +76,7 @@ function displaySiteCell(value: unknown): string {
 }
 
 /**
- * RMI: 가공사/제련사만 미인증·저장값 표시. 그 외 유형 → 해당없음 (데이터 입력 화면과 동일 규칙).
+ * RMI: 채굴/제련사만 미인증·저장값 표시. 그 외 유형 → 해당없음 (데이터 입력 화면과 동일 규칙).
  */
 function displayRmiForSiteTable(supplierType: string, rmiStored: unknown): string {
   if (isSmelterSupplierType(supplierType)) {
@@ -583,7 +578,7 @@ export function CompanyProfile() {
                                   ...prev,
                                   supplier_type: v,
                                   rmi_certified:
-                                    v === SUPPLIER_TYPE_SMELTER
+                                    v === SUPPLIER_TYPE_MINING_SMELTER
                                       ? prev.rmi_certified
                                       : '',
                                 }));
@@ -601,7 +596,7 @@ export function CompanyProfile() {
                               ))}
                             </select>
                             <p className="text-xs text-gray-500 mt-2 max-w-xl">
-                              제조사 · 가공사/제련사 · 유통/물류 · 채굴사 중 해당 유형을 선택하세요.
+                              제조사 · 가공사 · 채굴/제련사 중 해당 유형을 선택하세요.
                             </p>
                           </td>
                         </tr>
@@ -612,7 +607,7 @@ export function CompanyProfile() {
                             </td>
                             <td className={PROFILE_TD}>
                               <p className="text-xs text-gray-500 mb-2">
-                                가공사/제련사인 경우에만 입력합니다.
+                                채굴/제련사인 경우에만 입력합니다.
                               </p>
                               <div className="flex w-full max-w-xl items-center gap-2">
                                 <input

@@ -167,6 +167,25 @@ function mapKjToHistoryRecord(row: NotificationItemOut): HistoryRecord {
 /** 데모용 보조 목록 — 진입 요청/승인은 API만 사용(중복 방지) */
 const RAW_MOCK_NOTIFICATIONS: HistoryRecord[] = [
     {
+      id: "monthly-reminder-hardcoded-1",
+      timestamp: "2026-04-01 00:05:00",
+      type: "request",
+      changeContent: "매월 1일 자동으로 전월데이터 입력을 진행해주세요",
+      user: "시스템",
+      version: "-",
+      projectName: "전월 데이터 입력 리마인드",
+      projectStatus: "진행중",
+      clientName: "AIFIX",
+      supplyItem: "전월 데이터",
+      contractNumber: "-",
+      deadline: "-",
+      lastUpdate: "2026-04-01",
+      fromUser: "시스템",
+      toUser: "우리회사",
+      isRead: false,
+      direction: "inbox",
+    },
+    {
       id: "1",
       timestamp: "2026-03-04 16:10:23",
       type: "save",

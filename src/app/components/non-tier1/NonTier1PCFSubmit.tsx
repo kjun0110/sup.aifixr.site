@@ -1,5 +1,11 @@
 import { PCFCalculation } from "../shared/PCFCalculation";
 
-export function NonTier1PCFSubmit({ tier }: { tier: "tier2" | "tier3" }) {
-  return <PCFCalculation tier={tier} />;
+export function NonTier1PCFSubmit({
+  tier,
+  supplierType = "",
+}: {
+  tier: "tier2" | "tier3";
+  supplierType?: string;
+}) {
+  return <PCFCalculation tier={tier} supplierType={supplierType} />;
 }

@@ -17,8 +17,9 @@ import { NonTier1PCFSubmit } from "../components/non-tier1/NonTier1PCFSubmit";
 import { NonTier1Transmission } from "../components/non-tier1/NonTier1Transmission";
 import { NonTier1History } from "../components/non-tier1/NonTier1History";
 import { getMyProjectDetail, SupplierProject } from "../../lib/api/supply-chain";
+import { getMySupplierProfile } from "../../lib/api/supplierProfile";
 import { setSupAccessToken } from "../../lib/api/sessionAccessToken";
-import { actorStorageKey, restoreSupSessionFromCookie } from "../../lib/api/client";
+import { restoreSupSessionFromCookie } from "../../lib/api/client";
 import { 
   TrendingUp, 
   AlertCircle, 
@@ -57,6 +58,7 @@ export function ProjectView() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const searchParams = useSearchParams();
   const [project, setProject] = useState<any>(null);
+  const [supplierType, setSupplierType] = useState<string>("");
   const [loading, setLoading] = useState(true);
   
   const currentTier = project?.tier || "tier1";
@@ -89,17 +91,18 @@ export function ProjectView() {
         await restoreSupSessionFromCookie();
         if (cancelled) return;
         try {
-          const data = await getMyProjectDetail(projectId);
-          if (!cancelled) setProject(data);
+          const [data, profile] = await Promise.all([
+            getMyProjectDetail(projectId),
+            getMySupplierProfile().catch(() => null),
+          ]);
+          if (!cancelled) {
+            setProject(data);
+            setSupplierType(profile?.supplier_type ?? "");
+          }
         } catch (error) {
           console.error("프로젝트 상세 조회 실패:", error);
           if (!cancelled && error instanceof Error && error.message.includes("401")) {
             setSupAccessToken(null);
-            try {
-              localStorage.removeItem(actorStorageKey());
-            } catch {
-              /* ignore */
-            }
             router.push("/");
           }
         } finally {
@@ -146,6 +149,7 @@ export function ProjectView() {
         return (
           <SupplyChainManagement
             tier={currentTier}
+            supplierType={supplierType}
             inviteContext={
               project?.project_id != null
                 ? {
@@ -194,8 +198,8 @@ export function ProjectView() {
       
       case "pcf-submit":
         return currentTier === "tier1"
-          ? <Tier1PCFSubmit />
-          : <NonTier1PCFSubmit tier={currentTier} />;
+          ? <Tier1PCFSubmit supplierType={supplierType} />
+          : <NonTier1PCFSubmit tier={currentTier} supplierType={supplierType} />;
       
       case "transmission":
         return currentTier === "tier1"

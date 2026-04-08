@@ -30,6 +30,7 @@ import {
   AIFIXR_SESSION_UPDATED_EVENT,
 } from "@/lib/api/client";
 import {
+  getSupDataMgmtMonthlyDetail,
   getSupDataMgmtMonthlyExportXlsx,
   postSupDataMgmtImportPreview,
   putSupDataMgmtMonthlySave,
@@ -259,15 +260,23 @@ function normalizeTransportRowFromSource(
   return {
     _rowId: rowId,
     productName: str(r.productName) || str(r.product_name),
-    originCountry: str(r.originCountry) || str(r.origin_country),
+    originCountry:
+      str(r.originCountry) ||
+      str(r.origin_country_code) ||
+      str(r.origin_country),
     originAddress:
       str(r.originAddress) || str(r.origin_address_detail) || str(r.origin),
-    destinationCountry: str(r.destinationCountry) || str(r.destination_country),
+    destinationCountry:
+      str(r.destinationCountry) ||
+      str(r.dest_country_code) ||
+      str(r.destination_country),
     destinationAddress:
       str(r.destinationAddress) ||
       str(r.destination_address_detail) ||
       str(r.destination),
-    transportMethod: str(r.transportMethod) || str(r.transport_mode),
+    transportMethod: transportModeApiToUi(
+      str(r.transportMethod) || str(r.transport_mode),
+    ),
     transportFuelType: str(r.transportFuelType) || str(r.transport_fuel_type),
     transportFuelQty: str(r.transportFuelQty) || str(r.transport_fuel_qty),
     transportFuelQtyUnit:
@@ -288,12 +297,124 @@ const SUP_TRANSPORT_MODE_KO_TO_API: Record<string, "land" | "sea" | "air" | "rai
   철도: "rail",
 };
 
+const SUP_TRANSPORT_API_TO_UI_KO: Record<string, string> = {
+  land: "육운",
+  sea: "해운",
+  air: "항공",
+  rail: "철도",
+};
+
+function transportModeApiToUi(raw: unknown): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  const lower = s.toLowerCase();
+  if (SUP_TRANSPORT_API_TO_UI_KO[lower]) return SUP_TRANSPORT_API_TO_UI_KO[lower];
+  if (SUP_TRANSPORT_MODE_KO_TO_API[s]) return s;
+  return s;
+}
+
 function supTransportModeToApi(raw: string): string | undefined {
   const t = raw.trim();
   if (!t) return undefined;
   const lower = t.toLowerCase();
   if (["land", "sea", "air", "rail"].includes(lower)) return lower;
-  return SUP_TRANSPORT_MODE_KO_TO_API[t] ?? undefined;
+  const ko = SUP_TRANSPORT_MODE_KO_TO_API[t];
+  if (ko) return ko;
+  if (/트럭|truck|톤|육|도로|land|화물차|카고/i.test(t)) return "land";
+  if (/선박|ship|해운|vessel|컨테이너|sea|항만/i.test(t)) return "sea";
+  if (/항공|air|flight|비행/i.test(t)) return "air";
+  if (/철도|rail|train|기차|철길/i.test(t)) return "rail";
+  return undefined;
+}
+
+function mapDeliveredApiToProductRow(
+  d: Record<string, unknown>,
+  reportingYear: number,
+  reportingMonth: number,
+): Record<string, unknown> {
+  const iso = d.delivery_date != null ? String(d.delivery_date) : "";
+  let deliveryDate = "";
+  if (iso && /^\d{4}-\d{2}-\d{2}/.test(iso)) {
+    const y = parseInt(iso.slice(0, 4), 10);
+    const m = parseInt(iso.slice(5, 7), 10);
+    const day = parseInt(iso.slice(8, 10), 10);
+    if (y === reportingYear && m === reportingMonth) {
+      deliveryDate = String(day);
+    } else {
+      deliveryDate = iso.slice(0, 10).replace(/-/g, ".");
+    }
+  }
+  return {
+    ...EMPTY_PRODUCT_ROW(),
+    _rowId: newRowId(),
+    name: String(d.product_name ?? ""),
+    quantity: String(d.delivery_qty ?? ""),
+    unit: String(d.base_unit ?? ""),
+    standardWeight: String(d.product_unit_capacity_kg ?? ""),
+    defectiveQuantity: String(d.defective_qty ?? ""),
+    deliveryDate,
+    origin: String(d.mineral_origin ?? ""),
+    wasteQuantity: String(d.waste_qty ?? ""),
+    wasteQuantityUnit: String(d.waste_qty_unit ?? ""),
+    wasteEmissionFactor: String(d.waste_emission_factor ?? ""),
+    wasteEmissionFactorUnit: String(d.waste_emission_factor_unit ?? ""),
+  };
+}
+
+function mapMaterialApiToEditable(m: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...EMPTY_MATERIAL_ROW(),
+    _rowId: newRowId(),
+    productName: String(m.product_name ?? ""),
+    inputMaterialName: String(m.input_material_name ?? ""),
+    inputAmount: String(m.input_material_qty ?? ""),
+    inputAmountUnit: String(m.input_qty_unit ?? ""),
+    materialEmissionFactor: String(m.material_emission_factor ?? ""),
+    materialEmissionFactorUnit: String(m.material_emission_factor_unit ?? ""),
+    mineralType: String(m.input_mineral_type ?? ""),
+    mineralAmount: String(m.input_mineral_qty ?? ""),
+    mineralAmountUnit: String(m.input_mineral_qty_unit ?? ""),
+    mineralOrigin: String(m.mineral_origin ?? ""),
+    mineralEmissionFactor: String(m.mineral_emission_factor ?? ""),
+    mineralEmissionFactorUnit: String(m.mineral_emission_factor_unit ?? ""),
+  };
+}
+
+function mapEnergyApiToEditable(e: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...EMPTY_ENERGY_ROW(),
+    _rowId: newRowId(),
+    productName: String(e.product_name ?? ""),
+    energyType: normalizeEnergyTypeForUi(e.energy_type),
+    energyUsage: String(e.energy_usage ?? ""),
+    energyUnit: String(e.energy_unit ?? ""),
+    emissionFactor: String(e.energy_emission_factor ?? ""),
+    emissionFactorUnit: String(e.energy_emission_factor_unit ?? ""),
+  };
+}
+
+function mapTransportApiToEditable(t: Record<string, unknown>): Record<string, unknown> {
+  const transportMethod = transportModeApiToUi(t.transport_mode);
+  return normalizeTransportRowFromSource(
+    {
+      product_name: t.product_name,
+      origin_country_code: t.origin_country_code,
+      origin_country: t.origin_country,
+      origin_address_detail: t.origin_address_detail,
+      dest_country_code: t.dest_country_code,
+      destination_country: t.destination_country,
+      destination_address_detail: t.destination_address_detail,
+      transport_mode: transportMethod,
+      transport_fuel_type: t.transport_fuel_type,
+      transport_fuel_qty: t.transport_fuel_qty,
+      transport_fuel_qty_unit: t.transport_fuel_qty_unit,
+      transport_qty: t.transport_qty,
+      transport_qty_unit: t.transport_qty_unit,
+      transport_emission_factor: t.transport_emission_factor,
+      transport_emission_factor_unit: t.transport_emission_factor_unit,
+    },
+    null,
+  );
 }
 
 function supIso3166Alpha2(v: unknown): string | undefined {
@@ -310,6 +431,32 @@ function parseDeliveryDateIso(raw: unknown): string | undefined {
   const d = new Date(normalized);
   if (Number.isNaN(d.getTime())) return undefined;
   return d.toISOString().slice(0, 10);
+}
+
+/** 납품일: 조회 연·월 기준 일(1~31) 숫자만, 또는 기존 ISO/날짜 문자열 */
+function parseDeliveryDateForSave(
+  raw: unknown,
+  reportingYear: number,
+  reportingMonth: number,
+): string | undefined {
+  const s = String(raw ?? "").trim();
+  if (!s) return undefined;
+  const n = parseInt(s, 10);
+  if (!Number.isNaN(n) && n >= 1 && n <= 31) {
+    const d = new Date(reportingYear, reportingMonth - 1, n);
+    if (
+      d.getFullYear() !== reportingYear ||
+      d.getMonth() !== reportingMonth - 1 ||
+      d.getDate() !== n
+    ) {
+      return undefined;
+    }
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  return parseDeliveryDateIso(raw);
 }
 
 /** 자재·에너지·운송 탭 제품명 컬럼 안내 (계약 품목 + 생산제품 탭 연동) */
@@ -1062,8 +1209,8 @@ function isSameContactAsEditableRow(
   return false;
 }
 
-/** 회사 프로필 `supplier_type`과 동일한 가공사/제련사 문구 */
-const SUPPLIER_TYPE_SMELTER_LABEL = "가공사/제련사";
+/** 회사 프로필 `supplier_type`과 동일한 채굴/제련사 문구 */
+const SUPPLIER_TYPE_SMELTER_LABEL = "채굴/제련사";
 
 function isSmelterSupplierType(supplierType: string): boolean {
   return supplierType.trim() === SUPPLIER_TYPE_SMELTER_LABEL;
@@ -1076,7 +1223,7 @@ function displayCompanyField(value: unknown): string {
 }
 
 /**
- * RMI: 가공사/제련사만 입력 대상. 그 외(제조사·유통 등) → 해당없음.
+ * RMI: 채굴/제련사만 입력 대상. 그 외(제조사·가공사 등) → 해당없음.
  * 제련/가공: 미입력 → 미인증, 입력 시 저장값 그대로(인증·식별 문구 등).
  */
 function displayRmiCertification(supplierType: string, rmiStored: unknown): string {
@@ -1263,6 +1410,62 @@ export function SupplierDetail() {
     };
   }, [supplierId, projectPkForApi, searchParams, ownProjectDetailForCard]);
 
+  /** `own` + 데이터관리 컨텍스트일 때 월별 저장분을 API에서 불러와 탭 상태와 동기화 (새로고침 후에도 유지) */
+  const loadMonthlyDetailFromApi = useCallback(async () => {
+    if (supplierId !== "own") return;
+    const ctx = resolveDmSaveContext();
+    if (!ctx) {
+      setEditableProducts([EMPTY_PRODUCT_ROW()]);
+      setEditableMaterials([EMPTY_MATERIAL_ROW()]);
+      setEditableEnergy([EMPTY_ENERGY_ROW()]);
+      setEditableTransport([EMPTY_TRANSPORT_ROW()]);
+      return;
+    }
+    try {
+      await restoreSupSessionFromCookie();
+      const detail = await getSupDataMgmtMonthlyDetail({
+        projectId: ctx.projectId,
+        productId: ctx.productId,
+        supplierId: ctx.supplierId,
+        reportingYear: ctx.reportingYear,
+        reportingMonth: ctx.reportingMonth,
+        productVariantId: ctx.productVariantId,
+      });
+      if (detail.delivered_row) {
+        setEditableProducts([
+          mapDeliveredApiToProductRow(
+            detail.delivered_row,
+            ctx.reportingYear,
+            ctx.reportingMonth,
+          ),
+        ]);
+      } else {
+        setEditableProducts([EMPTY_PRODUCT_ROW()]);
+      }
+      if (detail.material_rows?.length) {
+        setEditableMaterials(detail.material_rows.map(mapMaterialApiToEditable));
+      } else {
+        setEditableMaterials([EMPTY_MATERIAL_ROW()]);
+      }
+      if (detail.energy_rows?.length) {
+        setEditableEnergy(detail.energy_rows.map(mapEnergyApiToEditable));
+      } else {
+        setEditableEnergy([EMPTY_ENERGY_ROW()]);
+      }
+      if (detail.transport_rows?.length) {
+        setEditableTransport(detail.transport_rows.map(mapTransportApiToEditable));
+      } else {
+        setEditableTransport([EMPTY_TRANSPORT_ROW()]);
+      }
+    } catch (e) {
+      toast.error(
+        e instanceof Error
+          ? e.message
+          : "저장된 월별 데이터를 불러오지 못했습니다. 연·월·세부제품이 포함된 링크로 들어왔는지 확인해 주세요.",
+      );
+    }
+  }, [supplierId, resolveDmSaveContext]);
+
   const loadContractDeliverableProductNames = useCallback(async () => {
     if (supplierId !== "own" || projectPkForApi == null) {
       setContractDeliverableProductNames([]);
@@ -1390,6 +1593,17 @@ export function SupplierDetail() {
 
   useEffect(() => {
     const s = supplierSyncRef.current;
+    setEditableProduction(
+      (s.production ?? []).map((r: Record<string, unknown>) => ({
+        ...r,
+        _rowId: (r._rowId as string) ?? newRowId(),
+      })),
+    );
+    setEditableContacts([...(s.contacts ?? [])]);
+
+    if (supplierId === "own") {
+      return;
+    }
     setEditableProducts(
       (() => {
         const rows = (s.products ?? []).map((r: Record<string, unknown>) => ({
@@ -1399,14 +1613,6 @@ export function SupplierDetail() {
         return rows.length > 0 ? rows : [EMPTY_PRODUCT_ROW()];
       })(),
     );
-    setEditableProduction(
-      (s.production ?? []).map((r: Record<string, unknown>) => ({
-        ...r,
-        _rowId: (r._rowId as string) ?? newRowId(),
-      })),
-    );
-    setEditableContacts([...(s.contacts ?? [])]);
-
     setEditableMaterials(
       (() => {
         const rows = (s.materials ?? []).map((r: Record<string, unknown>) => ({
@@ -1435,6 +1641,10 @@ export function SupplierDetail() {
       })(),
     );
   }, [supplierId, supplierNameKey, ownProfile]);
+
+  useEffect(() => {
+    void loadMonthlyDetailFromApi();
+  }, [loadMonthlyDetailFromApi]);
 
   // 권한 정책(협력사 포털):
   // - tier1: 모든 하위차사에게 수정요청 가능
@@ -1696,6 +1906,7 @@ export function SupplierDetail() {
       ...EMPTY_PRODUCT_ROW(),
       _rowId: newRowId(),
       name: pr.detail_product_name ?? "",
+      deliveryDate: pr.delivery_day ?? "",
       quantity: pr.production_qty ?? "",
       unit: pr.production_qty_unit ?? "",
       standardWeight: pr.product_unit_capacity_kg ?? "",
@@ -1728,9 +1939,10 @@ export function SupplierDetail() {
     );
 
     if (mode === "overwrite") {
-      setEditableContacts(
-        mappedContacts.length > 0 ? mappedContacts : [EMPTY_CONTACT_ROW()],
-      );
+      /** 담당자 탭은 프로필·직접 입력 값 유지. 엑셀에 담당자정보 시트 행이 있을 때만 반영 */
+      if (mappedContacts.length > 0) {
+        setEditableContacts(mappedContacts);
+      }
       setEditableMaterials(mappedMaterials.length > 0 ? mappedMaterials : [EMPTY_MATERIAL_ROW()]);
       setEditableEnergy(mappedEnergy.length > 0 ? mappedEnergy : [EMPTY_ENERGY_ROW()]);
       setEditableProducts(mappedProducts.length > 0 ? mappedProducts : [EMPTY_PRODUCT_ROW()]);
@@ -1837,7 +2049,12 @@ export function SupplierDetail() {
           ? {
               delivered_product_name: String(firstProduct.name ?? "").trim() || null,
               mineral_origin: String(firstProduct.origin ?? "").trim() || null,
-              delivery_date: parseDeliveryDateIso(firstProduct.deliveryDate) ?? null,
+              delivery_date:
+                parseDeliveryDateForSave(
+                  firstProduct.deliveryDate,
+                  ctx.reportingYear,
+                  ctx.reportingMonth,
+                ) ?? null,
               delivery_qty: String(firstProduct.quantity ?? "").trim() || null,
               base_unit: String(firstProduct.unit ?? "").trim() || null,
               product_unit_capacity_kg: String(firstProduct.standardWeight ?? "").trim() || null,
@@ -1961,6 +2178,7 @@ export function SupplierDetail() {
       } else {
         toast.success(res.message || "저장되었습니다.");
       }
+      await loadMonthlyDetailFromApi();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "저장 요청에 실패했습니다.");
     } finally {
@@ -2173,7 +2391,9 @@ export function SupplierDetail() {
   const displayContacts = supplierId === 'own' ? editableContacts : supplier.contacts;
 
   const displayMaterials = useMemo(() => {
-    if (supplierId === 'own') return editableMaterials;
+    if (supplierId === "own") {
+      return editableMaterials.length > 0 ? editableMaterials : [EMPTY_MATERIAL_ROW()];
+    }
     const rows = (supplier.materials ?? []).map((r: Record<string, unknown>) => ({
       ...r,
       _rowId: (r._rowId as string) ?? newRowId(),
@@ -2182,7 +2402,9 @@ export function SupplierDetail() {
   }, [supplierId, editableMaterials, supplier.materials]);
 
   const displayEnergy = useMemo(() => {
-    if (supplierId === 'own') return editableEnergy;
+    if (supplierId === "own") {
+      return editableEnergy.length > 0 ? editableEnergy : [EMPTY_ENERGY_ROW()];
+    }
     const rows = (supplier.energy ?? []).map((r: Record<string, unknown>) => ({
       ...r,
       _rowId: (r._rowId as string) ?? newRowId(),
@@ -2191,7 +2413,9 @@ export function SupplierDetail() {
   }, [supplierId, editableEnergy, supplier.energy]);
 
   const displayTransport = useMemo(() => {
-    if (supplierId === 'own') return editableTransport;
+    if (supplierId === "own") {
+      return editableTransport.length > 0 ? editableTransport : [EMPTY_TRANSPORT_ROW()];
+    }
     const rows = (supplier.transport ?? []).map((r: Record<string, unknown>) =>
       normalizeTransportRowFromSource(r, (r._rowId as string) ?? null),
     );
@@ -2681,7 +2905,7 @@ export function SupplierDetail() {
                           제품명
                         </th>
                         <th className={SUP_DETAIL_TH}>
-                          납품일
+                          납품일 (1~31)
                         </th>
                         <th className={SUP_DETAIL_TH}>
                           납품 수량(생산량)
