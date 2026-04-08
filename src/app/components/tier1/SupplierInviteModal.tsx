@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import {
   getInvitationAttachmentDataContractRevision,
   getInvitationHistory,
+  postRevokeInvitation,
   postSupInvitation,
   type InvitationAttachmentContractRevision,
   type InvitationHistoryItem,
@@ -52,7 +53,8 @@ type InviteRecord = {
   companyName: string;
   email: string;
   sentAt: string;
-  status: "invited" | "contract_signed" | "registered" | "pending_approval" | "connected";
+  status: "invited" | "contract_signed" | "registered" | "pending_approval" | "connected" | "revoked";
+  apiStatus?: string;
   signupRequestId?: number;
 };
 
@@ -73,7 +75,8 @@ function mapApiRowToRecord(r: InvitationHistoryItem): InviteRecord {
   } else if (r.status === "completed") status = "connected";
   else if (r.status === "sent") status = "invited";
   else if (r.status === "in_progress") status = "contract_signed";
-  else if (r.status === "revoked" || r.status === "expired") status = "invited";
+  else if (r.status === "revoked") status = "revoked";
+  else if (r.status === "expired") status = "invited";
 
   return {
     id: String(r.id),
@@ -81,6 +84,7 @@ function mapApiRowToRecord(r: InvitationHistoryItem): InviteRecord {
     email: r.invitee_email || "-",
     sentAt: new Date(r.created_at).toLocaleString(),
     status,
+    apiStatus: r.status,
     signupRequestId,
   };
 }
@@ -182,6 +186,7 @@ export function SupplierInviteModal({
   const [selectedContract, setSelectedContract] = useState("v2.0");
   const [openCompanyDropdownId, setOpenCompanyDropdownId] = useState<string | null>(null);
   const [sendInvitesLoading, setSendInvitesLoading] = useState(false);
+  const [revokingInvitationId, setRevokingInvitationId] = useState<string | null>(null);
   const inviteResumeInFlightRef = useRef(false);
 
   const companyCandidates = useMemo(() => {
@@ -430,6 +435,33 @@ export function SupplierInviteModal({
     );
   };
 
+  const handleRevokeInvite = async (record: InviteRecord) => {
+    const invitationId = Number(record.id);
+    if (!Number.isFinite(invitationId) || invitationId < 1) {
+      toast.error("발송 취소할 초대 ID를 확인할 수 없습니다.");
+      return;
+    }
+    if (
+      !window.confirm(
+        "이 초대 메일의 링크를 무효화합니다. 수신자는 더 이상 해당 링크로 가입을 진행할 수 없습니다. 계속할까요?",
+      )
+    ) {
+      return;
+    }
+    setRevokingInvitationId(record.id);
+    try {
+      await postRevokeInvitation(invitationId);
+      toast.success("발송이 취소되었고 초대 링크가 무효화되었습니다.");
+      await reloadHistory();
+    } catch (error) {
+      console.error("발송 취소 실패:", error);
+      const msg = error instanceof Error ? error.message : "발송 취소에 실패했습니다.";
+      toast.error(msg);
+    } finally {
+      setRevokingInvitationId(null);
+    }
+  };
+
   const createId = () => `r-${Math.random().toString(36).slice(2, 9)}`;
 
   const updateRecipient = (id: string, patch: Partial<RecipientDraft>) => {
@@ -608,6 +640,13 @@ export function SupplierInviteModal({
           <div className="flex items-center gap-1 text-xs" style={{ color: '#673AB7' }}>
             <CheckCircle className="w-3 h-3" />
             <span>연결완료</span>
+          </div>
+        );
+      case "revoked":
+        return (
+          <div className="flex items-center gap-1 text-xs" style={{ color: '#6B7280' }}>
+            <Ban className="w-3 h-3" />
+            <span>발송 취소</span>
           </div>
         );
       default:
@@ -1003,7 +1042,7 @@ export function SupplierInviteModal({
                   className="p-4 rounded-lg border transition-all hover:bg-gray-50"
                   style={{ borderColor: '#E0E0E0' }}
                 >
-                  <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-start justify-between mb-3 gap-2">
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-1">
                         <Building2 className="w-4 h-4" style={{ color: 'var(--aifix-primary)' }} />
@@ -1018,7 +1057,20 @@ export function SupplierInviteModal({
                         </span>
                       </div>
                     </div>
-                    {getStatusBadge(record.status)}
+                    <div className="shrink-0 flex items-center gap-2">
+                      {useLiveApi &&
+                      (record.apiStatus === "sent" || record.apiStatus === "in_progress") ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleRevokeInvite(record)}
+                          disabled={revokingInvitationId === record.id}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-red-200 text-red-700 bg-red-50 hover:bg-red-100 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                          {revokingInvitationId === record.id ? "취소 중..." : "발송 취소"}
+                        </button>
+                      ) : null}
+                      {getStatusBadge(record.status)}
+                    </div>
                   </div>
                   
                   <div 

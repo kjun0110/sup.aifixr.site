@@ -119,3 +119,12 @@ export async function getInvitationHistory(params?: {
   const suffix = q.toString() ? `?${q.toString()}` : "";
   return apiFetch<InvitationHistoryItem[]>(`${BASE}/invitations/history${suffix}`);
 }
+
+/** 발송 취소: 초대 status -> revoked, 공개 링크 무효화 */
+export async function postRevokeInvitation(
+  invitationId: number,
+): Promise<{ id: number; status: string }> {
+  return apiFetch<{ id: number; status: string }>(`${BASE}/invitations/${invitationId}/revoke`, {
+    method: "POST",
+  });
+}
