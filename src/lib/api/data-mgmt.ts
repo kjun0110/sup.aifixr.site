@@ -200,6 +200,7 @@ export type SupImportPreviewProduction = {
   site_name?: string;
   production_qty?: string;
   production_qty_unit?: string;
+  product_unit_capacity_kg?: string;
   defective_qty?: string;
   waste_qty?: string;
   waste_qty_unit?: string;
