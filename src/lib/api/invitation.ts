@@ -27,9 +27,10 @@ export async function getInvitationPreview(publicToken: string): Promise<{
 
 /** 데이터 계약 동의 (문서: POST .../public/accept-agreement) */
 export async function acceptAgreement(publicToken: string): Promise<{
+  status: string;
   invitation_id: number;
   contract_agreed_at: string;
-  existing_supplier: boolean;
+  existing_user_skip_signup: boolean;
 }> {
   return apiFetch(`${BASE}/public/accept-agreement`, {
     method: "POST",

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { Building2, User, Mail, Phone, Lock, Briefcase, ArrowLeft, AlertCircle, MapPin, X } from 'lucide-react';
 
@@ -188,7 +188,9 @@ export function SignupRegister({ invite }: { invite?: string }) {
   const [contactDepartment, setContactDepartment] = useState('');
   const [contactPosition, setContactPosition] = useState('');
   const [contactEmail, setContactEmail] = useState('');
-  const [invitedEmail, setInvitedEmail] = useState(''); // 초대받은 이메일 (변경 불가)
+  const [invitedEmail, setInvitedEmail] = useState(''); // 초대 시 안내 이메일 (자동 채움 1회, 이후 사용자 수정 가능)
+  /** 초대 API로 받은 이메일 자동 채움은 1회만 (빈 칸으로 지울 때마다 덮어쓰지 않음) */
+  const inviteEmailPrefilledRef = useRef(false);
   const [contactPhone, setContactPhone] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
@@ -299,16 +301,18 @@ export function SignupRegister({ invite }: { invite?: string }) {
   };
   
   const handleEmailSignup = () => {
-    // 이메일 회원가입 방식 선택 - 초대받은 이메일 자동 채움
+    // 이메일 회원가입 방식 선택 — 다시 들어오면 초대 이메일 1회 자동 채움 허용
+    inviteEmailPrefilledRef.current = false;
     setSignupMethod('email');
   };
 
-  // 이메일 회원가입 모드일 때 초대받은 이메일 자동 채우기
+  // 이메일 가입 + 초대에 이메일이 있을 때: 비어 있을 때만 1회 자동 채움 (이후 사용자가 자유롭게 수정)
   useEffect(() => {
-    if (signupMethod === 'email' && invitedEmail && !contactEmail) {
-      setContactEmail(invitedEmail);
-    }
-  }, [signupMethod, invitedEmail, contactEmail]);
+    if (signupMethod !== 'email' || !invitedEmail) return;
+    if (inviteEmailPrefilledRef.current) return;
+    setContactEmail((prev) => (prev.trim() === '' ? invitedEmail : prev));
+    inviteEmailPrefilledRef.current = true;
+  }, [signupMethod, invitedEmail]);
 
   const validate = () => {
     if (!companyName.trim()) return '회사명을 입력해주세요.';
@@ -524,6 +528,7 @@ export function SignupRegister({ invite }: { invite?: string }) {
               setGoogleUserId(null);
               setGoogleRefreshToken(null);
               setGoogleScope(null);
+              inviteEmailPrefilledRef.current = false;
               // 이메일 필드 비우기 (다시 선택 시 자동 채움)
               setContactEmail('');
               setPassword('');
@@ -668,6 +673,8 @@ export function SignupRegister({ invite }: { invite?: string }) {
                     </div>
                     <Input
                       type="email"
+                      name="login_email"
+                      autoComplete="email"
                       value={displayEmail}
                       onChange={(e) => setContactEmail(e.target.value)}
                       placeholder={isGoogleSignup ? "contact@gmail.com" : "contact@company.com"}

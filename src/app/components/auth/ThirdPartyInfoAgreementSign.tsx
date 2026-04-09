@@ -120,11 +120,21 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
     setAgreeSubmitting(true);
     try {
       // API 호출: 데이터 계약 동의
-      await acceptAgreement(invite);
+      const response = await acceptAgreement(invite);
 
       localStorage.setItem(LS_INVITE_KEY, invite || '');
       localStorage.setItem(LS_AGREEMENT_SIGNED_KEY, 'true');
 
+      // 기존 사용자인 경우 (회사명·이메일 일치) 회원가입 폼 건너뛰기
+      if (response.existing_user_skip_signup) {
+        alert(
+          '동의가 완료되었습니다.\n\n이미 등록된 계정(동일 회사명·이메일)이므로 회원가입을 건너뛰고 직상위 차사에게 승인 요청이 전달되었습니다.\n\n승인 후 기존 계정으로 로그인하여 프로젝트에 접근할 수 있습니다.'
+        );
+        router.push('/');
+        return;
+      }
+
+      // 신규 사용자인 경우 회원가입 폼으로 이동
       router.push(`/signup/${encodeURIComponent(invite)}/register`);
     } catch (error) {
       console.error('데이터 계약 동의 실패:', error);

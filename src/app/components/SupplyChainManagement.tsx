@@ -90,6 +90,34 @@ function tableStatusFromApi(dbStatus: string): Company["status"] {
   return "미제출";
 }
 
+/** API가 동일 업체명 노드를 두 줄 줄 때 트리에서 1개만 표시(상태 우선순위는 백엔드와 동일) */
+function dedupeApiSubtreeNodes(nodes: SupplierSubtreeNode[]): SupplierSubtreeNode[] {
+  const rank = (s: string) => {
+    const x = (s || "").toLowerCase();
+    if (x === "approved") return 0;
+    if (x === "signed_up") return 1;
+    if (x === "invited") return 2;
+    if (x === "added") return 3;
+    return 99;
+  };
+  const pick = (a: SupplierSubtreeNode, b: SupplierSubtreeNode): SupplierSubtreeNode => {
+    const ra = rank(a.status);
+    const rb = rank(b.status);
+    if (ra !== rb) return ra < rb ? a : b;
+    return a.supply_chain_node_id >= b.supply_chain_node_id ? a : b;
+  };
+  const byKey = new Map<string, SupplierSubtreeNode>();
+  for (const n of nodes) {
+    const k = n.company_name.trim().toLowerCase();
+    const prev = byKey.get(k);
+    byKey.set(k, prev ? pick(n, prev) : n);
+  }
+  return Array.from(byKey.values()).map((n) => ({
+    ...n,
+    children: dedupeApiSubtreeNodes(n.children),
+  }));
+}
+
 function mapSubtreeChild(n: SupplierSubtreeNode, parentKey: string): CompanyNode {
   return {
     id: `node-${n.supply_chain_node_id}`,
@@ -97,7 +125,9 @@ function mapSubtreeChild(n: SupplierSubtreeNode, parentKey: string): CompanyNode
     tier: apiTierToCompanyTier(n.tier),
     status: n.tree_status as CompanyNode["status"],
     parentId: parentKey,
-    children: n.children.map((c) => mapSubtreeChild(c, `node-${n.supply_chain_node_id}`)),
+    children: dedupeApiSubtreeNodes(n.children).map((c) =>
+      mapSubtreeChild(c, `node-${n.supply_chain_node_id}`),
+    ),
   };
 }
 
@@ -126,7 +156,7 @@ function buildTreeFromApi(sub: SupplierSubtreeResponse): CompanyNode {
     tier: apiTierToCompanyTier(sub.me.tier),
     status: sub.me.tree_status as CompanyNode["status"],
     parentId: "root",
-    children: sub.me.children.map((c) =>
+    children: dedupeApiSubtreeNodes(sub.me.children).map((c) =>
       mapSubtreeChild(c, `node-${sub.me!.supply_chain_node_id}`),
     ),
   };
@@ -137,6 +167,27 @@ function buildTreeFromApi(sub: SupplierSubtreeResponse): CompanyNode {
     status: "submitted",
     children: [meNode],
   };
+}
+
+/** 직하위 표에서 동일 업체명이 두 번(상태만 다른 중복 노드) 나오지 않게 — API와 무관하게 방어 */
+function dedupeCompaniesByDisplayName(rows: Company[]): Company[] {
+  const weight = (s: string) => (s === "제출완료" ? 2 : s === "보완필요" ? 1 : 0);
+  const byKey = new Map<string, Company>();
+  for (const c of rows) {
+    const k = c.name.trim().toLowerCase();
+    const prev = byKey.get(k);
+    if (!prev) {
+      byKey.set(k, c);
+      continue;
+    }
+    if (weight(c.status) > weight(prev.status)) {
+      byKey.set(k, c);
+    } else if (weight(c.status) === weight(prev.status)) {
+      const nid = (x: Company) => parseInt(x.id.replace(/\D/g, ""), 10) || 0;
+      if (nid(c) >= nid(prev)) byKey.set(k, c);
+    }
+  }
+  return Array.from(byKey.values());
 }
 
 function flattenDescendantsForTable(nodes: SupplierSubtreeNode[]): Company[] {
@@ -155,7 +206,7 @@ function flattenDescendantsForTable(nodes: SupplierSubtreeNode[]): Company[] {
     n.children.forEach(walk);
   };
   nodes.forEach(walk);
-  return out;
+  return dedupeCompaniesByDisplayName(out);
 }
 
 function collectTreeNodeIds(node: CompanyNode, acc: string[]) {

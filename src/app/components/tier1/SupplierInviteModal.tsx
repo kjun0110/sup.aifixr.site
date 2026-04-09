@@ -103,6 +103,35 @@ function formatRegisteredChildLabel(o: RegisteredChildOption): string {
   return suffix ? `${o.company_name} (${suffix})` : o.company_name;
 }
 
+/** 동일 회사명이 노드 상태만 달리 두 줄로 오면 최신 상태(연결완료 우선) 한 줄만 선택 */
+function registeredChildStatusRank(status: string | undefined): number {
+  const s = (status ?? "").toLowerCase();
+  if (s === "approved") return 0;
+  if (s === "signed_up") return 1;
+  if (s === "invited") return 2;
+  if (s === "added") return 3;
+  return 99;
+}
+
+function dedupeRegisteredChildOptions(rows: RegisteredChildOption[]): RegisteredChildOption[] {
+  const byName = new Map<string, RegisteredChildOption>();
+  for (const o of rows) {
+    const k = o.company_name.trim().toLowerCase();
+    const prev = byName.get(k);
+    if (!prev) {
+      byName.set(k, o);
+      continue;
+    }
+    const ra = registeredChildStatusRank(o.status);
+    const rb = registeredChildStatusRank(prev.status);
+    if (ra < rb) byName.set(k, o);
+    else if (ra === rb && o.id >= prev.id) byName.set(k, o);
+  }
+  return Array.from(byName.values()).sort((a, b) =>
+    a.company_name.localeCompare(b.company_name, "ko"),
+  );
+}
+
 export function SupplierInviteModal({
   isOpen,
   onClose,
@@ -374,7 +403,7 @@ export function SupplierInviteModal({
     void (async () => {
       try {
         const rows = await fetchRegisteredChildren();
-        if (!cancelled) setRegisteredOptions(rows ?? []);
+        if (!cancelled) setRegisteredOptions(dedupeRegisteredChildOptions(rows ?? []));
       } catch (e) {
         if (!cancelled) {
           setRegisteredOptions([]);
@@ -390,6 +419,26 @@ export function SupplierInviteModal({
       cancelled = true;
     };
   }, [isOpen, useLiveApi, fetchRegisteredChildren, childrenReloadToken]);
+
+  /** 목록이 중복 제거·갱신되면 이전에 고른 노드 id가 빠질 수 있어, 같은 회사명의 남은 노드로 맞춤 */
+  useEffect(() => {
+    if (!registeredOptions.length) return;
+    setRecipients((prev) =>
+      prev.map((r) => {
+        if (r.childSupplyChainNodeId == null) return r;
+        const ok = registeredOptions.some((o) => o.id === r.childSupplyChainNodeId);
+        if (ok) return r;
+        const match = registeredOptions.find(
+          (o) =>
+            o.company_name.trim().toLowerCase() === r.companyName.trim().toLowerCase(),
+        );
+        if (match) {
+          return { ...r, childSupplyChainNodeId: match.id };
+        }
+        return { ...r, childSupplyChainNodeId: null };
+      }),
+    );
+  }, [registeredOptions]);
 
   const handleApprove = async (record: InviteRecord) => {
     if (useLiveApi) {
