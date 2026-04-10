@@ -419,7 +419,10 @@ export function SignupRegister({ invite }: { invite?: string }) {
       }
 
       if (response.success) {
-        alert(response.message || '회원가입 신청이 완료되었습니다. 직상위 차사 승인 후 로그인 가능합니다.');
+        alert(
+          response.message ||
+            '회원가입이 완료되었습니다. 지금 로그인할 수 있으며, 프로젝트·제품 메뉴는 직상위 차사 승인 후 표시됩니다.',
+        );
         localStorage.setItem(LS_INVITE_KEY, invite);
         localStorage.removeItem('signup_form_data');
         
