@@ -12,17 +12,9 @@ type ProjectCardProps = {
   contractNumber: string;
   lastSubmission: string | null;
   status: string;
-  /** API 프로젝트: 공급망 노드 기준 차수 (프로젝트마다 다를 수 있음) */
+  /** API 호환용 (카드에는 표시하지 않음) */
   tier?: string;
 };
-
-function tierLabel(tier: string | undefined): string | null {
-  if (!tier) return null;
-  if (tier === "tier1") return "1차 협력사";
-  if (tier === "tier2") return "2차 협력사";
-  if (tier === "tier3") return "3차 협력사";
-  return null;
-}
 
 export function ProjectCard({
   id,
@@ -32,7 +24,7 @@ export function ProjectCard({
   contractNumber,
   lastSubmission,
   status,
-  tier,
+  tier: _tier,
 }: ProjectCardProps) {
   const [isHovered, setIsHovered] = useState(false);
   
@@ -84,19 +76,6 @@ export function ProjectCard({
           >
             {status}
           </span>
-          {tierLabel(tier) ? (
-            <span
-              className="px-3 py-1 rounded-lg border"
-              style={{
-                borderColor: "#E0E0E0",
-                fontSize: "13px",
-                fontWeight: 600,
-                color: "var(--aifix-navy)",
-              }}
-            >
-              {tierLabel(tier)}
-            </span>
-          ) : null}
         </div>
         <h3 
           className="text-2xl mb-1 transition-colors duration-300 pr-8" 

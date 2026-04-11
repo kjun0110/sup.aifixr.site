@@ -8,43 +8,6 @@ import { getMyProjects, SupplierProject } from "../../lib/api/supply-chain";
 import { getSupAccessToken } from "../../lib/api/sessionAccessToken";
 import { AIFIXR_SESSION_UPDATED_EVENT } from "../../lib/api/client";
 
-// Mock data for demonstration (요청에 따라 유지)
-const mockProjects = [
-  {
-    id: "p1",
-    name: "[삼성SDI] 양극재 납품",
-    clientName: "삼성SDI",
-    productName: "양극재",
-    productItemNumber: "AUDI_PROD_A_001",
-    contractPeriod: "2026.01 ~ 2026.12",
-    contractNumber: "CT-2026-003",
-    lastSubmission: "2026-03-03",
-    status: "진행중",
-  },
-  {
-    id: "p2",
-    name: "[동우전자부품] 전극제 납품",
-    clientName: "동우전자부품",
-    productName: "전극제",
-    productItemNumber: "AUDI_PROD_A_002",
-    contractPeriod: "2026.04 ~ 2027.03",
-    contractNumber: "CT-2026-002",
-    lastSubmission: "2026-02-28",
-    status: "검토중",
-  },
-  {
-    id: "p3",
-    name: "[세진케미칼] 리튬 납품",
-    clientName: "세진케미칼",
-    productName: "리튬",
-    productItemNumber: "AUDI_PROD_A_003",
-    contractPeriod: "2026.06 ~ 2027.12",
-    contractNumber: "CT-2026-001",
-    lastSubmission: "2026-03-01",
-    status: "진행중",
-  },
-];
-
 function buildDisplayName(project: SupplierProject): string {
   const rawName = String(project.name ?? "").trim();
   const item = String(project.productName ?? "").trim();
@@ -127,7 +90,6 @@ export function ProjectSelection() {
     ...project,
     name: buildDisplayName(project),
   }));
-  const allProjects = [...mockProjects, ...displayRealProjects];
   return (
     <div>
       {/* Page Header */}
@@ -194,7 +156,7 @@ export function ProjectSelection() {
       </div>
 
       {/* Empty State (hidden when there are projects) */}
-      {!loading && allProjects.length === 0 && (
+      {!loading && displayRealProjects.length === 0 && (
         <div className="text-center py-24">
           <div 
             className="w-24 h-24 rounded-full mx-auto mb-6 flex items-center justify-center"

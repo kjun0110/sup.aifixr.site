@@ -29,28 +29,6 @@ import {
   ArrowDownRight 
 } from "lucide-react";
 
-// Mock project data (목 데이터 유지)
-const mockProjectData: Record<string, { name: string; clientName: string; contractNumber: string; tier: "tier1" | "tier2" | "tier3" }> = {
-  p1: { 
-    name: "[삼성SDI] 양극재 납품", 
-    clientName: "삼성SDI", 
-    contractNumber: "CT-2026-003",
-    tier: "tier1"
-  },
-  p2: { 
-    name: "[동우전자부품] 전극제 납품", 
-    clientName: "동우전자부품", 
-    contractNumber: "CT-2026-002",
-    tier: "tier2"
-  },
-  p3: { 
-    name: "[세진케미칼] 리튬 납품", 
-    clientName: "세진케미칼", 
-    contractNumber: "CT-2026-001",
-    tier: "tier3"
-  },
-};
-
 export function ProjectView() {
   const params = useParams();
   const router = useRouter();
@@ -66,13 +44,6 @@ export function ProjectView() {
   // 프로젝트 상세 정보 로드
   useEffect(() => {
     if (!projectIdParam) return;
-    
-    // 목 데이터 프로젝트인 경우 (p1, p2, p3)
-    if (mockProjectData[projectIdParam]) {
-      setProject(mockProjectData[projectIdParam]);
-      setLoading(false);
-      return;
-    }
     
     // 실제 프로젝트인 경우 (real-로 시작하는 경우)
     if (projectIdParam.startsWith('real-')) {
