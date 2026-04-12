@@ -18,6 +18,20 @@ function isInvitationPublicPath(path: string): boolean {
   return normalized.includes("/invitation/public/");
 }
 
+/** 브라우저에서 `/projects/1`, `/projects/real-2` 경로면 현재 프로젝트 ID (opr_projects.id) */
+export function currentProjectIdFromPath(): string | null {
+  if (typeof window === "undefined") return null;
+  const m = window.location.pathname.match(/^\/projects\/(?:real-)?(\d+)/);
+  return m ? m[1] : null;
+}
+
+/** 협력사 다중 프로젝트: 백엔드가 해당 프로젝트의 supplier_id를 쓰도록 함 */
+function attachActorProjectId(headers: Headers): void {
+  if (headers.has("X-Actor-Project-Id")) return;
+  const pid = currentProjectIdFromPath();
+  if (pid) headers.set("X-Actor-Project-Id", pid);
+}
+
 /** trailing slash 제거 */
 export function getApiBase(): string {
   return (process.env.NEXT_PUBLIC_API_BASE || "").trim().replace(/\/$/, "");
@@ -97,6 +111,7 @@ export async function apiFetch<T = unknown>(
   if (token && !publicInvite && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+  attachActorProjectId(headers);
 
   if (json !== undefined) {
     headers.set("Content-Type", "application/json");
@@ -117,6 +132,7 @@ export async function apiFetch<T = unknown>(
       if (newToken) {
         h2.set("Authorization", `Bearer ${newToken}`);
       }
+      attachActorProjectId(h2);
       if (json !== undefined) {
         h2.set("Content-Type", "application/json");
       }
@@ -183,6 +199,7 @@ export async function apiFetchBlob(
   if (token && !publicInvite && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+  attachActorProjectId(headers);
 
   if (json !== undefined) {
     headers.set("Content-Type", "application/json");
@@ -206,6 +223,7 @@ export async function apiFetchBlob(
       if (newToken) {
         h2.set("Authorization", `Bearer ${newToken}`);
       }
+      attachActorProjectId(h2);
       if (json !== undefined) {
         h2.set("Content-Type", "application/json");
       }

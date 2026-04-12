@@ -254,17 +254,20 @@ export function SupplyChainManagement({
   const useApiTree =
     inviteContext?.projectId != null &&
     typeof projectId === "string" &&
-    projectId.startsWith("real-");
+    (projectId.startsWith("real-") || !isNaN(parseInt(projectId, 10)));
 
   const loadSubtree = useCallback(async () => {
     if (inviteContext?.projectId == null) return;
     try {
-      const s = await getMySupplyChainSubtree(inviteContext.projectId);
+      const s = await getMySupplyChainSubtree(
+        inviteContext.projectId,
+        inviteContext.myNodeId ?? undefined
+      );
       setApiSubtree(s);
     } catch {
       setApiSubtree(null);
     }
-  }, [inviteContext?.projectId]);
+  }, [inviteContext?.projectId, inviteContext?.myNodeId]);
 
   useEffect(() => {
     if (!useApiTree) {
@@ -1181,9 +1184,11 @@ export function SupplyChainManagement({
         const registerCompanyOk = isLiveRegister
           ? registerNameTrim.length > 0
           : selectedRegisterCompany != null;
+        const registerBizDigits = registerBizTrim.replace(/[^0-9]/g, '');
+        const registerBizValid = registerBizDigits.length === 10;
         const isRegisterFormComplete =
           registerCompanyOk &&
-          registerBizTrim.length > 0 &&
+          registerBizValid &&
           registerOrderTrim.length > 0 &&
           registerDatesValid &&
           registerQtyValid &&
@@ -1201,6 +1206,11 @@ export function SupplyChainManagement({
               }
               if (!biz) {
                 toast.error("사업자등록번호를 입력해 주세요.");
+                return;
+              }
+              const bizDigits = biz.replace(/[^0-9]/g, '');
+              if (bizDigits.length !== 10) {
+                toast.error("사업자등록번호는 10자리여야 합니다.");
                 return;
               }
               const orderName = registerOrderProductName.trim();
@@ -1235,7 +1245,7 @@ export function SupplyChainManagement({
               try {
                 await postRegisterDirectChild(liveProjectId, {
                   company_name: nameForLive,
-                  business_registration_number: biz,
+                  business_registration_number: bizDigits,
                   supplied_item_name: orderName,
                   contract_start: registerContractStart,
                   contract_end: registerContractEnd,
@@ -1434,11 +1444,28 @@ export function SupplyChainManagement({
                   </div>
                   <input
                     value={registerBusinessNumber}
-                    onChange={(e) => setRegisterBusinessNumber(e.target.value)}
-                    placeholder="예: 110-81-12345"
+                    onChange={(e) => {
+                      const value = e.target.value.replace(/[^0-9]/g, '');
+                      if (value.length <= 10) {
+                        // 자동 포맷팅: 111-81-12345
+                        let formatted = value;
+                        if (value.length > 3) {
+                          formatted = value.slice(0, 3) + '-' + value.slice(3);
+                        }
+                        if (value.length > 5) {
+                          formatted = value.slice(0, 3) + '-' + value.slice(3, 5) + '-' + value.slice(5);
+                        }
+                        setRegisterBusinessNumber(formatted);
+                      }
+                    }}
+                    placeholder="111-81-12345"
+                    maxLength={12}
                     className="w-full rounded-[16px] border border-gray-200 p-3 text-sm"
                     style={{ outline: "none" }}
                   />
+                  <p className="mt-1.5 text-xs" style={{ color: "var(--aifix-gray)" }}>
+                    사업자등록번호 10자리를 입력해주세요.
+                  </p>
                 </div>
 
                 {/* 3. 수주 제품명 — 전체 너비 */}
@@ -1468,6 +1495,8 @@ export function SupplyChainManagement({
                       type="date"
                       value={registerContractStart}
                       onChange={(e) => setRegisterContractStart(e.target.value)}
+                      min="1900-01-01"
+                      max="9999-12-31"
                       className="w-full min-w-0 flex-1 rounded-[16px] border border-gray-200 p-3 text-sm"
                       style={{ outline: "none" }}
                     />
@@ -1478,6 +1507,8 @@ export function SupplyChainManagement({
                       type="date"
                       value={registerContractEnd}
                       onChange={(e) => setRegisterContractEnd(e.target.value)}
+                      min="1900-01-01"
+                      max="9999-12-31"
                       className="w-full min-w-0 flex-1 rounded-[16px] border border-gray-200 p-3 text-sm"
                       style={{ outline: "none" }}
                     />

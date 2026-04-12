@@ -6,6 +6,7 @@ import { useState } from "react";
 
 type ProjectCardProps = {
   id: string;
+  project_id: number;
   name: string;
   productItemNumber: string;
   contractPeriod: string;
@@ -14,10 +15,14 @@ type ProjectCardProps = {
   status: string;
   /** API 호환용 (카드에는 표시하지 않음) */
   tier?: string;
+  profile_id?: number;
+  supplier_id?: number;
+  my_supply_chain_node_id?: number | null;
 };
 
 export function ProjectCard({
-  id,
+  id: _id,
+  project_id,
   name,
   productItemNumber,
   contractPeriod,
@@ -25,6 +30,9 @@ export function ProjectCard({
   lastSubmission,
   status,
   tier: _tier,
+  profile_id,
+  supplier_id,
+  my_supply_chain_node_id,
 }: ProjectCardProps) {
   const [isHovered, setIsHovered] = useState(false);
   
@@ -36,9 +44,13 @@ export function ProjectCard({
 
   const statusColor = statusColors[status as keyof typeof statusColors] || statusColors["진행중"];
 
+  const projectUrl = supplier_id 
+    ? `/projects/${project_id}?supplier_id=${supplier_id}${my_supply_chain_node_id ? `&supply_chain_node_id=${my_supply_chain_node_id}` : ''}`
+    : `/projects/${project_id}`;
+
   return (
     <Link
-      href={`/projects/${id}`}
+      href={projectUrl}
       className="block bg-white rounded-[20px] p-8 transition-all duration-300 hover:-translate-y-1 cursor-pointer relative"
       style={{
         boxShadow: isHovered 

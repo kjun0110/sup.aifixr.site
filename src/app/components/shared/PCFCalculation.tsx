@@ -17,7 +17,8 @@ import {
   ChevronDown,
   ChevronUp,
   FileText,
-  Activity
+  Activity,
+  Loader2,
 } from "lucide-react";
 import { MonthPicker } from "../MonthPicker";
 import {
@@ -32,13 +33,24 @@ import {
 } from "@/lib/api/pcf";
 import { restoreSupSessionFromCookie, AIFIXR_SESSION_UPDATED_EVENT } from "@/lib/api/client";
 import { getMyProjectDetail, type SupplierProject } from "@/lib/api/supply-chain";
+import { getSupAccessToken } from "@/lib/api/sessionAccessToken";
 
 type TierType = "tier1" | "tier2" | "tier3";
 type ReadinessStatus = "complete" | "partial" | "incomplete";
 
+/** 프로젝트 화면에서 넘기는 제품·변형·공급망 노드 — 복수 초대 시 `my_supply_chain_node_id`로 산정·준비도 분기 고정 */
+export type PcfCalculationLinkedProject = {
+  projectId: number;
+  productId: number;
+  productVariantId: number | null;
+  /** `getMyProjectDetail.my_supply_chain_node_id` — 동일 협력사가 티어1·2에 중복일 때 본인 노드 */
+  supplyChainNodeId?: number | null;
+};
+
 interface PCFCalculationProps {
   tier: TierType;
   supplierType?: string;
+  linkedProject?: PcfCalculationLinkedProject | null;
 }
 
 interface CalculationHistoryItem {
@@ -168,7 +180,11 @@ function defaultPreviousMonthKorean(): string {
   return `${d.getFullYear()}년 ${d.getMonth() + 1}월`;
 }
 
-export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps) {
+export function PCFCalculation({
+  tier,
+  supplierType = "",
+  linkedProject = null,
+}: PCFCalculationProps) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [isTransmitted, setIsTransmitted] = useState(false);
@@ -188,6 +204,9 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
   const [pcfRuns, setPcfRuns] = useState<PcfRunListItemDto[]>([]);
   const [pcfRunsLoading, setPcfRunsLoading] = useState(false);
   const [pcfTab, setPcfTab] = useState<"calculation" | "history">("calculation");
+  /** 산정 API 호출 중 — 버튼 스피너·중복 클릭 방지 */
+  const [partialPcfRunning, setPartialPcfRunning] = useState(false);
+  const [finalPcfRunning, setFinalPcfRunning] = useState(false);
 
   const tierName = tier === "tier1" ? "1차" : tier === "tier2" ? "2차" : "3차";
   const isMiningSmelter = supplierType.trim() === "채굴/제련사";
@@ -197,7 +216,7 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
   const ym = periodToYm(selectedPeriod);
 
   const projectPkFromPath = useMemo(() => {
-    const m = /\/projects\/real-(\d+)/i.exec(pathname ?? "");
+    const m = /\/projects\/(?:real-)?(\d+)/i.exec(pathname ?? "");
     if (!m) return null;
     const n = parseInt(m[1], 10);
     return Number.isFinite(n) && n > 0 ? n : null;
@@ -216,13 +235,26 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
     const productFromUrl = pickInt(["productId", "dmProductId"]);
     const variantFromUrl = pickInt(["productVariantId", "dmProductVariantId", "dmVariantId"]);
     const fullFromUrl = productFromUrl != null && variantFromUrl != null;
+    const nodeFromUrl = pickInt(["supply_chain_node_id", "supplyChainNodeId", "my_supply_chain_node_id"]);
 
     if (!projectPkFromPath) {
       setResolvedProject(null);
       setResolvedProjectLoading(false);
       return;
     }
-    if (fullFromUrl) {
+    if (fullFromUrl || nodeFromUrl != null) {
+      setResolvedProject(null);
+      setResolvedProjectLoading(false);
+      return;
+    }
+
+    if (
+      linkedProject != null &&
+      linkedProject.projectId === projectPkFromPath &&
+      linkedProject.productId >= 1 &&
+      linkedProject.productVariantId != null &&
+      linkedProject.productVariantId >= 1
+    ) {
       setResolvedProject(null);
       setResolvedProjectLoading(false);
       return;
@@ -245,7 +277,7 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
     return () => {
       cancelled = true;
     };
-  }, [projectPkFromPath, searchParams]);
+  }, [projectPkFromPath, searchParams, linkedProject]);
 
   const runContext = useMemo(() => {
     const pickInt = (keys: string[]): number | null => {
@@ -257,17 +289,65 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
       }
       return null;
     };
-    const projectId = pickInt(["projectId"]) ?? projectPkFromPath;
+    const projectId =
+      pickInt(["projectId"]) ??
+      projectPkFromPath ??
+      (linkedProject != null && linkedProject.projectId >= 1 ? linkedProject.projectId : null);
     const productId =
       pickInt(["productId", "dmProductId"]) ??
+      (linkedProject != null && linkedProject.productId >= 1 ? linkedProject.productId : null) ??
       (resolvedProject?.product_id != null && resolvedProject.product_id >= 1
         ? resolvedProject.product_id
         : null);
     const variantFromUrl = pickInt(["productVariantId", "dmProductVariantId", "dmVariantId"]);
+    const fromLinked =
+      linkedProject?.productVariantId != null &&
+      Number.isFinite(linkedProject.productVariantId) &&
+      linkedProject.productVariantId >= 1
+        ? linkedProject.productVariantId
+        : null;
     const fromDetail = resolvedProject?.product_variant_id;
     const productVariantId =
       variantFromUrl ??
+      fromLinked ??
       (fromDetail != null && Number.isFinite(fromDetail) && fromDetail >= 1 ? fromDetail : null);
+    const supplyChainNodeIdFromUrl = pickInt([
+      "supply_chain_node_id",
+      "supplyChainNodeId",
+      "my_supply_chain_node_id",
+    ]);
+    const supplyChainNodeId =
+      supplyChainNodeIdFromUrl ??
+      (linkedProject?.supplyChainNodeId != null && linkedProject.supplyChainNodeId >= 1
+        ? linkedProject.supplyChainNodeId
+        : resolvedProject?.my_supply_chain_node_id != null &&
+            resolvedProject.my_supply_chain_node_id >= 1
+          ? resolvedProject.my_supply_chain_node_id
+          : undefined);
+
+    /** 공급망 모식도·프로젝트 상세의 본인 노드만으로도 PCF API 호출 가능 */
+    if (
+      supplyChainNodeId != null &&
+      supplyChainNodeId >= 1 &&
+      projectId &&
+      ym
+    ) {
+      const [ys, ms] = ym.split("-");
+      const reportingYear = parseInt(ys, 10);
+      const reportingMonth = parseInt(ms, 10);
+      if (!Number.isFinite(reportingYear) || !Number.isFinite(reportingMonth)) return null;
+      return {
+        project_id: projectId,
+        reporting_year: reportingYear,
+        reporting_month: reportingMonth,
+        supply_chain_node_id: supplyChainNodeId,
+        ...(productId != null && productId >= 1 ? { product_id: productId } : {}),
+        ...(productVariantId != null && productVariantId >= 1
+          ? { product_variant_id: productVariantId }
+          : {}),
+      };
+    }
+
     if (!projectId || !productId || !productVariantId || !ym) return null;
     const [ys, ms] = ym.split("-");
     const reportingYear = parseInt(ys, 10);
@@ -279,8 +359,9 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
       product_variant_id: productVariantId,
       reporting_year: reportingYear,
       reporting_month: reportingMonth,
+      ...(supplyChainNodeId != null ? { supply_chain_node_id: supplyChainNodeId } : {}),
     };
-  }, [searchParams, ym, projectPkFromPath, resolvedProject]);
+  }, [searchParams, ym, projectPkFromPath, resolvedProject, linkedProject]);
 
   const loadPcfRuns = useCallback(async () => {
     if (!runContext) {
@@ -297,6 +378,7 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
         product_variant_id: runContext.product_variant_id,
         reporting_year: pcfTab === "calculation" ? runContext.reporting_year : undefined,
         reporting_month: pcfTab === "calculation" ? runContext.reporting_month : undefined,
+        supply_chain_node_id: runContext.supply_chain_node_id,
         limit: 50,
       });
       setPcfRuns(list);
@@ -323,12 +405,18 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
       setSupReadinessLoading(true);
       try {
         await restoreSupSessionFromCookie();
+        if (!getSupAccessToken()) {
+          console.warn('[PCFCalculation] No token after restore, waiting for session event...');
+          if (!cancelled) setSupReadinessLoading(false);
+          return;
+        }
         const r = await getSupPcfReadiness({
           project_id: runContext.project_id,
           product_id: runContext.product_id,
           product_variant_id: runContext.product_variant_id,
           reporting_year: runContext.reporting_year,
           reporting_month: runContext.reporting_month,
+          supply_chain_node_id: runContext.supply_chain_node_id,
         });
         if (!cancelled) setSupReadiness(r);
       } catch {
@@ -356,6 +444,7 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
             product_variant_id: runContext.product_variant_id,
             reporting_year: runContext.reporting_year,
             reporting_month: runContext.reporting_month,
+            supply_chain_node_id: runContext.supply_chain_node_id,
           });
           setSupReadiness(r);
           await loadPcfRuns();
@@ -414,7 +503,8 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
 
   /** API 기준 준비 단계 (원청 OPR readiness와 동일한 의미) */
   const readinessStatusForUi = useMemo((): "complete" | "partial" | "incomplete" => {
-    if (!runContext) return "partial";
+    /** 산정 컨텍스트가 없으면 API를 호출하지 못하므로 partial(부분 준비)로 두면 안내 문구가 실제와 어긋남 */
+    if (!runContext) return "incomplete";
     if (!supReadiness) return "incomplete";
     if (!supReadiness.own_pcf_input_ready) return "incomplete";
     if (supReadiness.child_total === 0 || supReadiness.all_children_shared) return "complete";
@@ -431,6 +521,11 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
       iconColor: string;
       statusColor: string;
     };
+    const needsProductVariantFromParent =
+      linkedProject != null &&
+      linkedProject.projectId >= 1 &&
+      linkedProject.productId >= 1 &&
+      (linkedProject.productVariantId == null || linkedProject.productVariantId < 1);
     const calcStage = (() => {
       if (lastRun === "final") {
         return {
@@ -460,6 +555,46 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
     })();
 
     if (!runContext) {
+      if (needsProductVariantFromParent) {
+        return [
+          {
+            id: "own-data",
+            label: "자사 데이터",
+            status: "partial" as ReadinessStatus,
+            value: "제품 변형 미선택",
+            icon: AlertCircle,
+            iconColor: "#FF9800",
+            statusColor: "#FF9800",
+          },
+          {
+            id: "supplier-data",
+            label: "하위 협력사 데이터",
+            status: "partial" as ReadinessStatus,
+            value: "—",
+            icon: Activity,
+            iconColor: "#9E9E9E",
+            statusColor: "#9E9E9E",
+          },
+          {
+            id: "coverage",
+            label: "데이터 커버리지",
+            status: "partial" as ReadinessStatus,
+            value: "—",
+            icon: Activity,
+            iconColor: "#9E9E9E",
+            statusColor: "#9E9E9E",
+          },
+          {
+            id: "calc-stage",
+            label: "산정 상태",
+            status: calcStage.status,
+            value: calcStage.value,
+            icon: calcStage.icon,
+            iconColor: calcStage.iconColor,
+            statusColor: calcStage.statusColor,
+          },
+        ] satisfies CardRow[];
+      }
       if (projectPkFromPath && resolvedProjectLoading) {
         return [
           {
@@ -666,7 +801,15 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
         statusColor: calcStage.statusColor,
       },
     ] satisfies CardRow[];
-  }, [runContext, supReadiness, supReadinessLoading, projectPkFromPath, resolvedProjectLoading, lastRun]);
+  }, [
+    runContext,
+    supReadiness,
+    supReadinessLoading,
+    projectPkFromPath,
+    resolvedProjectLoading,
+    lastRun,
+    linkedProject,
+  ]);
 
   const calculationHistoryRows = useMemo(() => {
     const dqrHint =
@@ -1118,6 +1261,9 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
 
   const getWarningMessage = () => {
     if (readinessStatusForUi === "incomplete") {
+      if (!runContext) {
+        return "프로젝트·제품·세부제품(변형)이 확정되지 않아 준비도 API를 호출하지 못했습니다. 데이터 관리에서 제품·변형이 선택됐는지 확인해 주세요.";
+      }
       if (runContext && !supReadinessLoading && !supReadiness) {
         return "PCF 준비도를 불러오지 못했습니다. 로그인·프로젝트 링크(제품·세부제품 쿼리)를 확인해 주세요.";
       }
@@ -1133,51 +1279,81 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
     readinessStatusForUi === "incomplete" ||
     (readinessStatusForUi === "partial" && hasDownstream);
 
+  const pcfCalcBusy = partialPcfRunning || finalPcfRunning;
+
   const handlePartialCalculate = async () => {
+    if (pcfCalcBusy) return;
     if (!ym || !canPartialCalculate) {
       toast.error("부분산정 조건이 충족되지 않았습니다.");
       return;
     }
+    setPartialPcfRunning(true);
     try {
-      if (runContext) {
-        await postSupPcfRunExecute({
-          ...runContext,
-          calculation_mode: "partial",
-        });
-      }
-      toast.success(runContext ? "부분산정을 실행했습니다." : "부분산정을 실행합니다 (데모 모드)");
-      await loadPcfRuns();
-      if (runContext) {
-        const tr = await getSupPcfTransferReadiness(runContext);
-        setSupTransferReadiness(tr);
-        setIsTransmitted(Boolean(tr.already_transferred));
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "부분산정 실행에 실패했습니다.");
+      await toast.promise(
+        (async () => {
+          if (runContext) {
+            await postSupPcfRunExecute({
+              ...runContext,
+              calculation_mode: "partial",
+            });
+          }
+          await loadPcfRuns();
+          if (runContext) {
+            const tr = await getSupPcfTransferReadiness(runContext);
+            setSupTransferReadiness(tr);
+            setIsTransmitted(Boolean(tr.already_transferred));
+          }
+          return runContext
+            ? "부분 PCF 산정이 완료되었습니다."
+            : "데모: 부분 산정 흐름을 반영했습니다.";
+        })(),
+        {
+          loading: "부분 PCF 산정을 실행하는 중입니다…",
+          success: (msg) => msg,
+          error: (e) =>
+            e instanceof Error ? e.message : "부분산정 실행에 실패했습니다.",
+        },
+      );
+    } finally {
+      setPartialPcfRunning(false);
     }
   };
 
   const handleFinalCalculate = async () => {
+    if (pcfCalcBusy) return;
     if (!ym || !canFinalCalculate) {
       toast.error("최종산정 조건이 충족되지 않았습니다.");
       return;
     }
+    setFinalPcfRunning(true);
     try {
-      if (runContext) {
-        await postSupPcfRunExecute({
-          ...runContext,
-          calculation_mode: "final",
-        });
-      }
-      toast.success(runContext ? "최종 PCF 산정을 실행했습니다." : "최종 PCF 산정을 실행합니다 (데모 모드)");
-      await loadPcfRuns();
-      if (runContext) {
-        const tr = await getSupPcfTransferReadiness(runContext);
-        setSupTransferReadiness(tr);
-        setIsTransmitted(Boolean(tr.already_transferred));
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "최종 PCF 산정 실행에 실패했습니다.");
+      await toast.promise(
+        (async () => {
+          if (runContext) {
+            await postSupPcfRunExecute({
+              ...runContext,
+              calculation_mode: "final",
+            });
+          }
+          await loadPcfRuns();
+          if (runContext) {
+            const tr = await getSupPcfTransferReadiness(runContext);
+            setSupTransferReadiness(tr);
+            setIsTransmitted(Boolean(tr.already_transferred));
+          }
+          return runContext
+            ? "최종 PCF 산정이 완료되었습니다."
+            : "데모: 최종 산정 흐름을 반영했습니다.";
+        })(),
+        {
+          loading: "최종 PCF 산정을 실행하는 중입니다…",
+          success: (msg) => msg,
+          error: (e) =>
+            e instanceof Error ? e.message : "최종 PCF 산정 실행에 실패했습니다.",
+        },
+      );
+    } finally {
+      setFinalPcfRunning(false);
     }
   };
 
@@ -1574,6 +1750,9 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
               value={selectedPeriod}
               onChange={setSelectedPeriod}
             />
+            <p className="mt-1.5 text-xs" style={{ color: "var(--aifix-gray)", lineHeight: 1.5 }}>
+              기본 선택은 시스템 날짜 기준 <strong className="text-gray-700">지난 달</strong>입니다. 데이터 관리에서 입력·준비한 연·월로 바꿔 주세요.
+            </p>
           </div>
         </div>
       </div>
@@ -1634,38 +1813,58 @@ export function PCFCalculation({ tier, supplierType = "" }: PCFCalculationProps)
         <div className="flex flex-wrap items-center gap-3 mt-4">
           <button
             type="button"
-            onClick={handlePartialCalculate}
-            disabled={!canPartialCalculate}
-            className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all"
+            onClick={() => void handlePartialCalculate()}
+            disabled={!canPartialCalculate || pcfCalcBusy}
+            className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all min-w-[200px] justify-center"
             style={{
-              backgroundColor: canPartialCalculate ? '#5B3BFA' : '#E0E0E0',
-              color: canPartialCalculate ? 'white' : '#9E9E9E',
+              backgroundColor:
+                canPartialCalculate && !pcfCalcBusy ? '#5B3BFA' : '#E0E0E0',
+              color: canPartialCalculate && !pcfCalcBusy ? 'white' : '#9E9E9E',
               fontWeight: 600,
-              cursor: canPartialCalculate ? 'pointer' : 'not-allowed',
+              cursor:
+                canPartialCalculate && !pcfCalcBusy ? 'pointer' : 'not-allowed',
               border: 'none',
-              opacity: canPartialCalculate ? 1 : 0.6
+              opacity: canPartialCalculate && !pcfCalcBusy ? 1 : 0.75,
+              boxShadow:
+                partialPcfRunning
+                  ? '0 0 0 3px rgba(91, 59, 250, 0.35)'
+                  : undefined,
             }}
           >
-            <Play className="w-5 h-5" />
-            부분 PCF 산정
+            {partialPcfRunning ? (
+              <Loader2 className="w-5 h-5 shrink-0 animate-spin" aria-hidden />
+            ) : (
+              <Play className="w-5 h-5 shrink-0" aria-hidden />
+            )}
+            {partialPcfRunning ? "부분 산정 실행 중…" : "부분 PCF 산정"}
           </button>
 
           <button
             type="button"
-            onClick={handleFinalCalculate}
-            disabled={!canFinalCalculate}
-            className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all"
+            onClick={() => void handleFinalCalculate()}
+            disabled={!canFinalCalculate || pcfCalcBusy}
+            className="flex items-center gap-2 px-6 py-3 rounded-lg transition-all min-w-[200px] justify-center"
             style={{
-              backgroundColor: canFinalCalculate ? '#00897B' : '#E0E0E0',
-              color: canFinalCalculate ? 'white' : '#9E9E9E',
+              backgroundColor:
+                canFinalCalculate && !pcfCalcBusy ? '#00897B' : '#E0E0E0',
+              color: canFinalCalculate && !pcfCalcBusy ? 'white' : '#9E9E9E',
               fontWeight: 600,
-              cursor: canFinalCalculate ? 'pointer' : 'not-allowed',
+              cursor:
+                canFinalCalculate && !pcfCalcBusy ? 'pointer' : 'not-allowed',
               border: 'none',
-              opacity: canFinalCalculate ? 1 : 0.6
+              opacity: canFinalCalculate && !pcfCalcBusy ? 1 : 0.75,
+              boxShadow:
+                finalPcfRunning
+                  ? '0 0 0 3px rgba(0, 137, 123, 0.35)'
+                  : undefined,
             }}
           >
-            <CheckCircle className="w-5 h-5" />
-            최종 PCF 산정
+            {finalPcfRunning ? (
+              <Loader2 className="w-5 h-5 shrink-0 animate-spin" aria-hidden />
+            ) : (
+              <CheckCircle className="w-5 h-5 shrink-0" aria-hidden />
+            )}
+            {finalPcfRunning ? "최종 산정 실행 중…" : "최종 PCF 산정"}
           </button>
 
           <button

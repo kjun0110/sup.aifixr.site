@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { 
   Check, 
   FileText, 
@@ -14,6 +15,7 @@ import {
   ThumbsUp,
   ThumbsDown,
   Users,
+  Database,
 } from "lucide-react";
 import { format, isWithinInterval, startOfDay, endOfDay } from "date-fns";
 import { ko } from "date-fns/locale";
@@ -29,6 +31,9 @@ import {
   type NotificationItemOut,
 } from "../../lib/api/notification";
 import { approveSignupRequest, rejectSignupRequest } from "../../lib/api/signup-review";
+import { getMyProjects, type SupplierProject } from "../../lib/api/supply-chain";
+import { getDataRequestTargetNavigation } from "../../lib/api/data-mgmt";
+import { restoreSupSessionFromCookie } from "../../lib/api/client";
 
 type DateRange = { from: Date | undefined; to?: Date | undefined };
 
@@ -46,7 +51,8 @@ type HistoryType =
   | "complete"
   | "entry_request"
   | "entry_approved"
-  | "partner_tier_entry";
+  | "partner_tier_entry"
+  | "data_request";
 
 type HistoryRecord = {
   id: string;
@@ -73,6 +79,8 @@ type HistoryRecord = {
   backendId?: number;
   fromApi?: boolean;
   signupRequestId?: number;
+  /** nt_user_notifications.reference_id → dm_data_request_targets.id */
+  dataRequestTargetId?: number;
 };
 
 function isoToLocalTimestamp(iso: string): string {
@@ -148,6 +156,24 @@ function mapKjToHistoryRecord(row: NotificationItemOut): HistoryRecord {
       clientName: row.title,
       supplyItem: "—",
       fromUser: "상위차사",
+    };
+  }
+
+  if (row.notification_type === "data_request_received") {
+    const tid =
+      row.reference_type === "data_request_target" && row.reference_id
+        ? parseInt(row.reference_id, 10)
+        : NaN;
+    return {
+      ...base,
+      type: "data_request",
+      changeContent: row.body || row.title,
+      user: "상위 협력사",
+      projectName: row.title,
+      clientName: row.title,
+      supplyItem: "데이터 입력",
+      fromUser: "데이터 요청",
+      dataRequestTargetId: Number.isFinite(tid) ? tid : undefined,
     };
   }
 
@@ -329,6 +355,7 @@ const MOCK_SUPPLEMENT_RECORDS: HistoryRecord[] = RAW_MOCK_NOTIFICATIONS.filter(
 );
 
 export function Notifications() {
+  const router = useRouter();
   const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedRecord, setSelectedRecord] = useState<HistoryRecord | null>(null);
@@ -336,12 +363,27 @@ export function Notifications() {
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [dataEntryNavLoading, setDataEntryNavLoading] = useState(false);
+
+  /** 데이터 입력 이동 시 getMyProjects 반복 호출 방지 */
+  const myProjectsCacheRef = useRef<{ t: number; list: SupplierProject[] } | null>(null);
+  const MY_PROJECTS_TTL_MS = 45_000;
+
+  const getMyProjectsCached = useCallback(async (): Promise<SupplierProject[]> => {
+    const now = Date.now();
+    const c = myProjectsCacheRef.current;
+    if (c && now - c.t < MY_PROJECTS_TTL_MS) return c.list;
+    const list = await getMyProjects();
+    myProjectsCacheRef.current = { t: now, list };
+    return list;
+  }, []);
 
   const loadNotifications = useCallback(async () => {
     setListLoading(true);
     setListError(null);
     try {
-      const rows = await listMyNotifications({ limit: 100, offset: 0 });
+      await restoreSupSessionFromCookie();
+      const rows = await listMyNotifications({ limit: 50, offset: 0 });
       const apiMapped = rows.map(mapKjToHistoryRecord);
       const merged = [...apiMapped, ...MOCK_SUPPLEMENT_RECORDS].sort(
         (a, b) => parseTimestamp(b.timestamp).getTime() - parseTimestamp(a.timestamp).getTime(),
@@ -362,6 +404,53 @@ export function Notifications() {
   useEffect(() => {
     void loadNotifications();
   }, [loadNotifications]);
+
+  const navigateToDataEntry = useCallback(
+    async (targetId: number) => {
+      setDataEntryNavLoading(true);
+      try {
+        await restoreSupSessionFromCookie();
+        const projects = await getMyProjectsCached();
+        const supplierIds = [
+          ...new Set(
+            projects
+              .map((p) => p.supplier_id)
+              .filter((id): id is number => typeof id === "number" && id > 0),
+          ),
+        ];
+        if (supplierIds.length === 0) {
+          toast.error("참여 중인 프로젝트가 없어 이동할 수 없습니다.");
+          return;
+        }
+        const settled = await Promise.allSettled(
+          supplierIds.map((sid) => getDataRequestTargetNavigation(targetId, sid)),
+        );
+        for (let i = 0; i < settled.length; i++) {
+          const r = settled[i];
+          if (r.status !== "fulfilled") continue;
+          const nav = r.value;
+          const sid = supplierIds[i];
+          const q = new URLSearchParams({
+            tab: "data-mgmt",
+            show: "true",
+            reporting_year: String(nav.reporting_year),
+            reporting_month: String(nav.reporting_month),
+            supplier_id: String(sid),
+          });
+          router.push(`/projects/real-${nav.project_id}?${q.toString()}`);
+          return;
+        }
+        toast.error(
+          "이동에 필요한 정보를 찾지 못했습니다. 프로젝트 참여 권한을 확인해 주세요.",
+        );
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "데이터 입력 화면으로 이동하지 못했습니다.");
+      } finally {
+        setDataEntryNavLoading(false);
+      }
+    },
+    [getMyProjectsCached, router],
+  );
 
   const [mailbox, setMailbox] = useState<"inbox" | "outbox">("inbox");
   const [showUnreadOnly, setShowUnreadOnly] = useState(false);
@@ -434,6 +523,8 @@ export function Notifications() {
         return <Check className="w-4 h-4" />;
       case "partner_tier_entry":
         return <Users className="w-4 h-4" />;
+      case "data_request":
+        return <Database className="w-4 h-4" />;
       default:
         return <FileText className="w-4 h-4" />;
     }
@@ -457,6 +548,8 @@ export function Notifications() {
         return "진입 승인";
       case "partner_tier_entry":
         return "협력사 진입";
+      case "data_request":
+        return "데이터 요청";
       default:
         return type;
     }
@@ -480,6 +573,8 @@ export function Notifications() {
         return "#4CAF50";
       case "partner_tier_entry":
         return "#00897B";
+      case "data_request":
+        return "#1565C0";
       default:
         return "#757575";
     }
@@ -749,10 +844,13 @@ export function Notifications() {
                 return (
                   <div
                     key={record.id}
-                    onClick={() => handleSelectRecord(record)}
+                    onClick={() => {
+                      if (!dataEntryNavLoading) handleSelectRecord(record);
+                    }}
                     className={cn(
                       "grid grid-cols-12 gap-4 px-6 py-4 border-b border-gray-100 cursor-pointer transition-all hover:bg-gray-50",
-                      mailbox === "inbox" && !record.isRead && "bg-blue-50/50"
+                      mailbox === "inbox" && !record.isRead && "bg-blue-50/50",
+                      dataEntryNavLoading && "opacity-60 pointer-events-none",
                     )}
                     style={{
                       backgroundColor: isSelected ? 'var(--aifix-secondary-light)' : undefined
@@ -860,17 +958,19 @@ export function Notifications() {
 
                 <hr className="border-gray-100 my-1" />
 
-                {/* 메시지(변경 내용) */}
-                <div className="text-sm text-gray-700 break-words leading-relaxed">
+                {/* 메시지(변경 내용) — API 본문의 줄바꿈 유지 */}
+                <div className="text-sm text-gray-700 break-words leading-relaxed whitespace-pre-line">
                   {selectedRecord.changeContent}
                 </div>
 
-                {/* 발신 → 수신 */}
-                <div className="text-sm text-gray-600">
-                  <span className="font-medium">{selectedRecord.fromUser}</span>
-                  <span className="text-gray-400 mx-1">→</span>
-                  <span className="font-medium">{selectedRecord.toUser}</span>
-                </div>
+                {/* 발신 → 수신 (데이터 요청 알림은 본문에 충분해 별도 표시 생략) */}
+                {selectedRecord.type !== "data_request" && (
+                  <div className="text-sm text-gray-600">
+                    <span className="font-medium">{selectedRecord.fromUser}</span>
+                    <span className="text-gray-400 mx-1">→</span>
+                    <span className="font-medium">{selectedRecord.toUser}</span>
+                  </div>
+                )}
 
                 {/* 승인 요청 상세 */}
                 {shouldShowApprovalActions && (
@@ -920,6 +1020,25 @@ export function Notifications() {
                     </div>
                     <p className="text-xs text-gray-400">
                       직하위 협력사의 가입 제출 알림이며, 서버에 신청 ID가 연결된 경우에만 승인·반려할 수 있습니다.
+                    </p>
+                  </div>
+                )}
+
+                {selectedRecord.type === "data_request" && selectedRecord.dataRequestTargetId != null && (
+                  <div className="pt-2 space-y-2">
+                    <hr className="border-gray-100" />
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="w-full bg-[#1565C0] hover:bg-[#0D47A1] text-white"
+                      disabled={dataEntryNavLoading}
+                      onClick={() => void navigateToDataEntry(selectedRecord.dataRequestTargetId!)}
+                    >
+                      <Database size={14} className="mr-1.5 shrink-0" />
+                      {dataEntryNavLoading ? "이동 중…" : "해당 연·월 데이터 입력 화면으로"}
+                    </Button>
+                    <p className="text-xs text-gray-400">
+                      클릭 시 해당 프로젝트 데이터 관리(요청 연·월) 화면으로 이동합니다.
                     </p>
                   </div>
                 )}

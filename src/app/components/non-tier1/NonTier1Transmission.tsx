@@ -48,10 +48,19 @@ function isFinalRun(r: PcfRunListItemDto): boolean {
   return (r.run_kind ?? "").toLowerCase() === "node_rollup";
 }
 
+/** `/projects/1` · `/projects/real-1` 모두 (PCF 산정·전송 공통) */
+function projectIdFromPathname(pathname: string | null): number | null {
+  const m = /\/projects\/(?:real-)?(\d+)/i.exec(pathname ?? "");
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
-  const tierName = tier === "tier2" ? "2차" : "3차";
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  /** Next `searchParams` 참조가 바뀔 때마다 useMemo/useEffect가 불필요하게 도는 것 방지 */
+  const searchQueryKey = searchParams.toString();
   const [selectedPeriod, setSelectedPeriod] = useState("2026년 1월");
   const [showTransmitModal, setShowTransmitModal] = useState(false);
   const [hasDirectRequest, setHasDirectRequest] = useState(false);
@@ -83,6 +92,8 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
   const canSelectFinal = finalPcfCalculated;
   const ym = periodToYm(selectedPeriod);
 
+  const projectPkFromPath = useMemo(() => projectIdFromPathname(pathname), [pathname]);
+
   const runContext = useMemo(() => {
     const pickInt = (keys: string[]): number | null => {
       for (const key of keys) {
@@ -93,27 +104,42 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
       }
       return null;
     };
-    const projectPk = (() => {
-      const m = /\/projects\/real-(\d+)/i.exec(pathname ?? "");
-      if (!m) return null;
-      const n = parseInt(m[1], 10);
-      return Number.isFinite(n) && n > 0 ? n : null;
-    })();
     const projectId =
       pickInt(["projectId", "project_id", "dmProjectId"]) ??
       resolvedProject?.project_id ??
-      projectPk;
+      projectPkFromPath;
     const productId =
       pickInt(["productId", "product_id", "dmProductId"]) ??
       (resolvedProject?.product_id ?? null);
     const productVariantId =
       pickInt(["productVariantId", "product_variant_id", "dmProductVariantId", "dmVariantId"]) ??
       (resolvedProject?.product_variant_id ?? null);
-    if (!projectId || !productId || !productVariantId || !ym) return null;
+    const supplyChainNodeId =
+      pickInt(["supply_chain_node_id", "supplyChainNodeId", "my_supply_chain_node_id"]) ??
+      (resolvedProject?.my_supply_chain_node_id != null && resolvedProject.my_supply_chain_node_id >= 1
+        ? resolvedProject.my_supply_chain_node_id
+        : null);
+
+    if (!projectId || !ym) return null;
     const [ys, ms] = ym.split("-");
     const reportingYear = parseInt(ys, 10);
     const reportingMonth = parseInt(ms, 10);
     if (!Number.isFinite(reportingYear) || !Number.isFinite(reportingMonth)) return null;
+
+    if (supplyChainNodeId != null && supplyChainNodeId >= 1) {
+      return {
+        project_id: projectId,
+        reporting_year: reportingYear,
+        reporting_month: reportingMonth,
+        supply_chain_node_id: supplyChainNodeId,
+        ...(productId != null && productId >= 1 ? { product_id: productId } : {}),
+        ...(productVariantId != null && productVariantId >= 1
+          ? { product_variant_id: productVariantId }
+          : {}),
+      };
+    }
+
+    if (!productId || !productVariantId) return null;
     return {
       project_id: projectId,
       product_id: productId,
@@ -121,7 +147,16 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
       reporting_year: reportingYear,
       reporting_month: reportingMonth,
     };
-  }, [pathname, searchParams, resolvedProject, ym]);
+  }, [
+    pathname,
+    searchQueryKey,
+    resolvedProject?.project_id,
+    resolvedProject?.product_id,
+    resolvedProject?.product_variant_id,
+    resolvedProject?.my_supply_chain_node_id,
+    ym,
+    projectPkFromPath,
+  ]);
 
   useEffect(() => {
     const pickInt = (keys: string[]): number | null => {
@@ -133,16 +168,16 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
       }
       return null;
     };
-    const fromPath = (() => {
-      const m = /\/projects\/real-(\d+)/i.exec(pathname ?? "");
-      if (!m) return null;
-      const n = parseInt(m[1], 10);
-      return Number.isFinite(n) && n > 0 ? n : null;
-    })();
-    const hasFullContext =
-      pickInt(["productId", "product_id", "dmProductId"]) != null &&
-      pickInt(["productVariantId", "product_variant_id", "dmProductVariantId", "dmVariantId"]) != null;
-    if (!fromPath || hasFullContext) {
+    const productFromUrl = pickInt(["productId", "product_id", "dmProductId"]);
+    const variantFromUrl = pickInt(["productVariantId", "product_variant_id", "dmProductVariantId", "dmVariantId"]);
+    const nodeFromUrl = pickInt(["supply_chain_node_id", "supplyChainNodeId", "my_supply_chain_node_id"]);
+    const fullFromUrl = productFromUrl != null && variantFromUrl != null;
+
+    if (!projectPkFromPath) {
+      setResolvedProject(null);
+      return;
+    }
+    if (fullFromUrl || nodeFromUrl != null) {
       setResolvedProject(null);
       return;
     }
@@ -150,7 +185,7 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
     void (async () => {
       try {
         await restoreSupSessionFromCookie();
-        const d = await getMyProjectDetail(fromPath);
+        const d = await getMyProjectDetail(projectPkFromPath);
         if (!cancelled) setResolvedProject(d);
       } catch {
         if (!cancelled) setResolvedProject(null);
@@ -159,7 +194,7 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
     return () => {
       cancelled = true;
     };
-  }, [pathname, searchParams]);
+  }, [pathname, searchQueryKey, projectPkFromPath]);
 
   useEffect(() => {
     if (!runContext) {
@@ -183,6 +218,8 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
             product_variant_id: runContext.product_variant_id,
             reporting_year: runContext.reporting_year,
             reporting_month: runContext.reporting_month,
+            supply_chain_node_id:
+              "supply_chain_node_id" in runContext ? runContext.supply_chain_node_id : undefined,
             limit: 100,
             offset: 0,
           }),
@@ -211,7 +248,14 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
     return () => {
       cancelled = true;
     };
-  }, [runContext]);
+  }, [
+    runContext?.project_id,
+    runContext?.reporting_year,
+    runContext?.reporting_month,
+    runContext != null && 'supply_chain_node_id' in runContext ? runContext.supply_chain_node_id : undefined,
+    runContext?.product_id,
+    runContext?.product_variant_id,
+  ]);
 
   const openTransmitModal = () => {
     if (!canOpenTransmitModal) return;
@@ -332,7 +376,7 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
           전송
         </h2>
         <p style={{ color: 'var(--aifix-gray)', fontSize: '15px' }}>
-          상위차사로 PCF 데이터 패키지를 전송합니다 ({tierName} 협력사)
+          상위차사로 PCF 데이터 패키지를 전송합니다
         </p>
       </div>
 
@@ -415,7 +459,7 @@ export function NonTier1Transmission({ tier }: NonTier1TransmissionProps) {
 
             <div className="mb-3 p-3 rounded-lg" style={{ backgroundColor: '#F8F9FB' }}>
               <div className="flex items-center justify-between text-xs mb-1">
-                <span style={{ color: 'var(--aifix-gray)' }}>전체 협력사(직하위)</span>
+                <span style={{ color: 'var(--aifix-gray)' }}>전체 협력사</span>
                 <span style={{ fontWeight: 600, color: 'var(--aifix-navy)' }}>{totalChildren}개</span>
               </div>
               <div className="flex items-center justify-between text-xs mb-1">

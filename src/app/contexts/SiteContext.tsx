@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { usePathname } from "next/navigation";
 import {
   restoreSupSessionFromCookie,
   AIFIXR_SESSION_UPDATED_EVENT,
@@ -119,7 +120,16 @@ interface SiteContextType {
 
 const SiteContext = createContext<SiteContextType | undefined>(undefined);
 
+/** 로그인·사업장 API가 필요 없는 경로 (미로그인 시 refresh/workplaces 401 콘솔 노이즈 방지) */
+function isPublicSupPath(pathname: string | null): boolean {
+  if (!pathname) return true;
+  if (pathname === "/" || pathname === "") return true;
+  if (pathname.startsWith("/signup")) return true;
+  return false;
+}
+
 export function SiteProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
   const [sites, setSites] = useState<Site[]>([]);
   const [sitesLoading, setSitesLoading] = useState(false);
   const [sitesError, setSitesError] = useState<string | null>(null);
@@ -146,8 +156,14 @@ export function SiteProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    if (isPublicSupPath(pathname)) {
+      setSitesLoading(false);
+      setSites([]);
+      setSitesError(null);
+      return;
+    }
     void refreshSites();
-  }, [refreshSites]);
+  }, [pathname, refreshSites]);
 
   useEffect(() => {
     const onSession = () => {

@@ -112,7 +112,16 @@ function revokeAllObjectUrls(rows: Record<string, OcrMonthlyRow>) {
 
 /** 인증 파일 업로드 — 월별 조회 + 인증 스키마(엑셀형) + 원본 파일 팝업 */
 export function OcrDataInput() {
-  const [monthPickerValue, setMonthPickerValue] = useState('');
+  // 기본값: 전월 (현재 월 기준 -1개월)
+  const getDefaultMonth = () => {
+    const now = new Date();
+    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const year = lastMonth.getFullYear();
+    const month = lastMonth.getMonth() + 1;
+    return `${year}년 ${month}월`;
+  };
+  
+  const [monthPickerValue, setMonthPickerValue] = useState(getDefaultMonth());
   const [viewYm, setViewYm] = useState<string | null>(null);
   const [hasQueried, setHasQueried] = useState(false);
   const [rowsByYm, setRowsByYm] = useState<Record<string, OcrMonthlyRow>>({});

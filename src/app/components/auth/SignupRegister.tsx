@@ -106,7 +106,7 @@ function CountryLocationPicker({
       {open && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onClick={close}>
           <div
-            className="flex max-h-[min(32rem,85vh)] w-full max-w-lg min-h-0 flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+            className="flex h-[32rem] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
             role="dialog"
             aria-modal="true"
             onClick={(e) => e.stopPropagation()}
@@ -135,7 +135,7 @@ function CountryLocationPicker({
               />
               <p className="text-xs text-gray-500">국가명(한글) 또는 ISO 코드로 검색합니다. ({filtered.length}건)</p>
             </div>
-            <ul className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
+            <ul className="h-80 overflow-y-auto overscroll-contain px-2 py-2">
               {filtered.map((e) => (
                 <li key={e.code}>
                   <button
@@ -197,6 +197,8 @@ export function SignupRegister({ invite }: { invite?: string }) {
 
   const [agreeAll, setAgreeAll] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
 
   const isGoogleSignup = signupMethod === 'google';
   // 초대받은 이메일을 항상 표시 (Google 연동 여부와 무관)
@@ -419,15 +421,13 @@ export function SignupRegister({ invite }: { invite?: string }) {
       }
 
       if (response.success) {
-        alert(
+        setSuccessMessage(
           response.message ||
-            '회원가입이 완료되었습니다. 지금 로그인할 수 있으며, 프로젝트·제품 메뉴는 직상위 차사 승인 후 표시됩니다.',
+            '회원가입이 완료되었습니다. 초대사의 확인 후 프로젝트 내역이 생성됩니다.'
         );
+        setShowSuccessModal(true);
         localStorage.setItem(LS_INVITE_KEY, invite);
         localStorage.removeItem('signup_form_data');
-        
-        // 로그인 페이지로 이동
-        router.push('/');
       } else {
         alert(response.message || '회원가입 신청 중 오류가 발생했습니다.');
       }
@@ -767,6 +767,37 @@ export function SignupRegister({ invite }: { invite?: string }) {
           </CardContent>
         </Card>
       </div>
+
+      {/* 회원가입 성공 모달 */}
+      {showSuccessModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full shadow-xl">
+            <div className="text-center">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-100">
+                <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-bold text-gray-900 mb-2">회원가입 완료</h3>
+              <p className="text-gray-600 mb-2 text-center">회원가입이 완료되었습니다.</p>
+              <p className="text-gray-600 mb-6 text-center">초대사의 확인 후 프로젝트 내역이 생성됩니다.</p>
+              <Button
+                onClick={() => {
+                  setShowSuccessModal(false);
+                  router.push('/');
+                }}
+                className="w-full"
+                style={{
+                  background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+                  color: 'white',
+                }}
+              >
+                확인
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

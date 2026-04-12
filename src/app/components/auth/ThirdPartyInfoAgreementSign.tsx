@@ -78,6 +78,7 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
   const [agreeSubmitting, setAgreeSubmitting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [showSkipModal, setShowSkipModal] = useState(false);
 
   const canSubmit =
     agreeCollection && agreeThirdParty && signerName.trim() === '동의합니다';
@@ -127,10 +128,7 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
 
       // 기존 사용자인 경우 (회사명·이메일 일치) 회원가입 폼 건너뛰기
       if (response.existing_user_skip_signup) {
-        alert(
-          '동의가 완료되었습니다.\n\n이미 등록된 계정(동일 회사명·이메일)이므로 회원가입을 건너뛰고 직상위 차사에게 승인 요청이 전달되었습니다.\n\n지금도 기존 계정으로 로그인할 수 있습니다. 프로젝트 진입·메뉴는 직상위 차사 승인 후 표시됩니다.'
-        );
-        router.push('/');
+        setShowSkipModal(true);
         return;
       }
 
@@ -353,17 +351,19 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
         >
           <CardContent className="p-6" style={{ padding: SECTION_PADDING }}>
             <div className="font-semibold text-gray-900 mb-4">서명 정보</div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                서명 <span className="text-red-500">*</span>
-              </label>
-              <Input
-                value={signerName}
-                onChange={(e) => setSignerName(e.target.value)}
-                placeholder="동의합니다"
-                className="bg-white max-w-xs"
+            <div className="flex items-start gap-3">
+              <Checkbox
+                id="agree-sign"
+                checked={signerName === "동의합니다"}
+                onCheckedChange={(v) => setSignerName(v ? "동의합니다" : "")}
               />
-              <p className="text-xs text-gray-500 mt-1">서명란에 &quot;동의합니다&quot;를 입력해주세요.</p>
+              <label
+                htmlFor="agree-sign"
+                className="text-sm font-medium text-gray-900 cursor-pointer flex-1"
+              >
+                동의합니다 <span className="text-red-500">*</span>
+                <p className="text-xs text-gray-500 mt-1 font-normal">위 내용에 동의합니다.</p>
+              </label>
             </div>
           </CardContent>
         </Card>
@@ -384,6 +384,39 @@ function ThirdPartyInfoAgreementSignInner({ invite }: { invite?: string }) {
           </Button>
         </div>
       </div>
+
+      {/* 기존 회원 건너뛰기 모달 */}
+      {showSkipModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4" style={{ boxShadow: '0px 8px 32px rgba(0, 0, 0, 0.12)' }}>
+            <div className="text-center">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-100">
+                <svg className="h-6 w-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-bold text-gray-900 mb-2">동의가 완료되었습니다</h3>
+              <p className="text-gray-600 mb-2 text-center">이미 등록된 계정(동일 회사명·이메일)이므로</p>
+              <p className="text-gray-600 mb-2 text-center">회원가입을 건너뛰고 직상위 차사에게</p>
+              <p className="text-gray-600 mb-4 text-center">승인 요청이 전달되었습니다.</p>
+              <p className="text-sm text-gray-500 mb-6 text-center">지금도 기존 계정으로 로그인할 수 있습니다.<br/>프로젝트 진입·메뉴는 직상위 차사 승인 후 표시됩니다.</p>
+              <Button
+                onClick={() => {
+                  setShowSkipModal(false);
+                  router.push('/');
+                }}
+                className="w-full"
+                style={{
+                  background: 'linear-gradient(90deg, #5B3BFA 0%, #00B4FF 100%)',
+                  color: 'white',
+                }}
+              >
+                확인
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

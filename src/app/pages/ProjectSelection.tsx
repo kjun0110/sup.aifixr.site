@@ -145,11 +145,8 @@ export function ProjectSelection() {
           </div>
         ) : (
           <>
-            {mockProjects.map((project) => (
-              <ProjectCard key={`mock-${project.id}`} {...project} />
-            ))}
             {displayRealProjects.map((project) => (
-              <ProjectCard key={`real-${project.id}`} {...project} />
+              <ProjectCard key={project.id} {...project} />
             ))}
           </>
         )}

@@ -41,9 +41,6 @@ export function GlobalNav() {
             </div>
             <span className="text-2xl tracking-tight" style={{ color: 'var(--aifix-navy)' }}>
               <span style={{ fontWeight: 700 }}>AIFIX</span>
-              <span style={{ fontWeight: 300, color: 'var(--aifix-gray)', marginLeft: '8px' }}>
-                협력사 포털
-              </span>
             </span>
           </Link>
 

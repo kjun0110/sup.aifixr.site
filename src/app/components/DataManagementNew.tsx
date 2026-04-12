@@ -36,6 +36,8 @@ export type DataMgmtLinkedProject = {
   productId: number;
   supplierId: number;
   productVariantId?: number | null;
+  /** 공급망 루트 노드(협력사 프로젝트 상세) */
+  supplyChainNodeId?: number | null;
 };
 
 type DataManagementNewProps = {
@@ -44,6 +46,8 @@ type DataManagementNewProps = {
   linkedProject?: DataMgmtLinkedProject | null;
   /** 화면 상단 프로젝트 제목 등 — 납품 제품명 미기입 시 엑셀 파일명에 사용 */
   linkedProjectExportLabel?: string | null;
+  /** 프로젝트 카드의 요청 기업명 — 트리 루트(본인) 행은 직상위가 트리에 없어 이 값으로 상세 직상위차사 전달 */
+  linkedProjectClientName?: string | null;
 };
 
 /** 조회 기간 기본 라벨: 캘린더 기준 전월만 (1월이면 작년 12월) */
@@ -69,6 +73,19 @@ function periodToYmKorean(period: string): string | null {
   return `${m[1]}-${String(parseInt(m[2], 10)).padStart(2, "0")}`;
 }
 
+/** 제출 기한: YYYY-MM-DD + 연도 4자리(2000~2099) + 실제 달력 */
+function isValidCalendarIsoDate(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const y = parseInt(s.slice(0, 4), 10);
+  const m = parseInt(s.slice(5, 7), 10);
+  const d = parseInt(s.slice(8, 10), 10);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return false;
+  if (y < 2000 || y > 2099) return false;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(y, m - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+}
+
 type SupplierNode = {
   id: string;
   nodeId?: number | null;
@@ -81,6 +98,8 @@ type SupplierNode = {
   dqr: string;
   pcfStatus: "완료" | "검증중" | "계산 대기" | "미제출" | "미작성";
   pcfResult: number | null; // kg CO₂e
+  /** 하위→상위 전송 상태: shared(전송 완료) | pending(미전송) | not_applicable(하위 없음/본인) */
+  upstreamReady?: "shared" | "pending" | "not_applicable";
   children?: SupplierNode[];
   isOwn?: boolean;
 };
@@ -122,6 +141,9 @@ function mapSupTreeToSupplierNode(
   const mappedChildren = (api.children ?? []).map((ch) => mapSupTreeToSupplierNode(ch));
   // 데이터 관리 트리에는 승인된(approved) 하위 노드만 표시
   const visibleChildren = mappedChildren.filter((ch) => ch.dataStatus === "완료");
+  const ur = (api.upstream_ready || "").toLowerCase();
+  const upstreamReady: SupplierNode["upstreamReady"] =
+    ur === "shared" ? "shared" : ur === "pending" ? "pending" : "not_applicable";
 
   return {
     id,
@@ -135,6 +157,7 @@ function mapSupTreeToSupplierNode(
     dqr: api.dqr?.trim() || "—",
     pcfStatus,
     pcfResult,
+    upstreamReady,
     isOwn: Boolean(api.is_me),
     children: visibleChildren,
   };
@@ -144,6 +167,7 @@ export function DataManagementNew({
   tier,
   linkedProject = null,
   linkedProjectExportLabel = null,
+  linkedProjectClientName = null,
 }: DataManagementNewProps) {
   const params = useParams();
   const projectId = typeof params.projectId === 'string' ? params.projectId : params.projectId?.[0] ?? 'p1';
@@ -248,6 +272,18 @@ export function DataManagementNew({
     sessionStorage.removeItem(DATA_MGMT_FILTER_STORAGE_KEY);
     sessionStorage.removeItem(DATA_MGMT_BACK_FLAG_KEY);
   }, []);
+
+  // 알림/딥링크: ?reporting_year= & reporting_month= 로 해당 연·월 조회 화면 열기
+  useEffect(() => {
+    const ry = searchParams.get("reporting_year");
+    const rm = searchParams.get("reporting_month");
+    if (!ry || !rm) return;
+    const y = parseInt(ry, 10);
+    const m = parseInt(rm, 10);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return;
+    setPeriod(`${y}년 ${m}월`);
+    setShowResults(true);
+  }, [searchParams]);
 
   // Mock supply chain data (프로젝트/차수 기준으로 "우리회사" 기준점이 달라집니다)
   const supplyChainData: SupplierNode = useMemo(() => {
@@ -609,8 +645,7 @@ export function DataManagementNew({
   }, [displayTree, tier]);
 
   const isTargetSelectableByPolicy = (depthFromRoot: number) => {
-    if (tier === 'tier1') return depthFromRoot >= 2;
-    return depthFromRoot === 2;
+    return depthFromRoot >= 1;
   };
 
   const collectSelectableTargetIds = (node: RequestModalNode, depth: number = 0): string[] => {
@@ -684,8 +719,10 @@ export function DataManagementNew({
       // No children means this is a leaf node - always ready
       return true;
     }
-    // All children must have PCF status "완료" for upstream to be ready
-    return supplier.children.every(child => child.pcfStatus === "완료");
+    // All children must have PCF status "완료" AND upstreamReady "shared" for upstream to be ready
+    return supplier.children.every(
+      (child) => child.pcfStatus === "완료" && child.upstreamReady === "shared"
+    );
   };
 
   // PCF 상태 배지 - 원청사(상태 열) 스타일: 데이터 미제출, 하위 데이터 부족, PCF 계산 완료
@@ -704,7 +741,25 @@ export function DataManagementNew({
       return <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-xs font-medium">데이터 미제출</span>;
     }
     if (hasChildren && !upstreamReady) {
-      return <span className="px-3 py-1 bg-orange-100 text-orange-700 rounded-full text-xs font-medium flex items-center gap-1"><AlertTriangle className="w-3 h-3" />하위 데이터 부족</span>;
+      const missingChildren = supplier.children!.filter(
+        (ch) => ch.pcfStatus !== "완료" || ch.upstreamReady !== "shared"
+      );
+      const notSharedCount = missingChildren.filter(
+        (ch) => ch.pcfStatus === "완료" && ch.upstreamReady === "pending"
+      ).length;
+      const tooltip =
+        notSharedCount > 0
+          ? `하위 ${notSharedCount}개 협력사가 데이터를 전송하지 않았습니다`
+          : "하위 협력사 PCF 미완료";
+      return (
+        <span
+          className="px-3 py-1 bg-orange-100 text-orange-700 rounded-full text-xs font-medium flex items-center gap-1"
+          title={tooltip}
+        >
+          <AlertTriangle className="w-3 h-3" />
+          하위 데이터 부족
+        </span>
+      );
     }
     if (supplier.pcfStatus === "계산 대기") {
       return <span className="px-3 py-1 bg-yellow-100 text-yellow-700 rounded-full text-xs font-medium flex items-center gap-1"><Clock className="w-3 h-3" />계산 대기</span>;
@@ -783,7 +838,7 @@ export function DataManagementNew({
     }
   };
 
-  const renderSupplierRow = (supplier: SupplierNode, level: number = 0) => {
+  const renderSupplierRow = (supplier: SupplierNode, level: number = 0, parentSupplier: SupplierNode | null = null) => {
     const isExpanded = expandedNodes.has(supplier.id);
     const hasChildren = supplier.children && supplier.children.length > 0;
     /* 회사명 폭 제한, 국가~상세보기 열이 나머지 공간 균등 분배 */
@@ -912,8 +967,38 @@ export function DataManagementNew({
                       })()
                     : "";
 
+                const parentLabelFromTree =
+                  parentSupplier != null &&
+                  parentSupplier.name.trim() !== "" &&
+                  parentSupplier.name.trim() !== "-"
+                    ? parentSupplier.name.replace(/\s*\(나\)\s*$/, "").trim()
+                    : "";
+                const fallbackRootRequester =
+                  parentSupplier === null &&
+                  level === 0 &&
+                  linkedProject &&
+                  linkedProjectClientName != null &&
+                  String(linkedProjectClientName).trim() !== ""
+                    ? String(linkedProjectClientName).trim()
+                    : "";
+                const dmParentLabel = parentLabelFromTree || fallbackRootRequester;
+                const dmParentQuery = dmParentLabel
+                  ? `&dmDirectParentName=${encodeURIComponent(dmParentLabel)}`
+                  : "";
+
+                const curSid = searchParams.get("supplier_id");
+                const curScn = searchParams.get("supply_chain_node_id");
+                const dmReturnQuery =
+                  curSid != null && curSid !== ""
+                    ? `&dmReturnSupplierId=${encodeURIComponent(curSid)}`
+                    : "";
+                const dmReturnScnQuery =
+                  curScn != null && curScn !== ""
+                    ? `&dmReturnSupplyChainNodeId=${encodeURIComponent(curScn)}`
+                    : "";
+
                 router.push(
-                  `/projects/${projectId}/suppliers/${supplierKey}?backTab=data-mgmt&supplierName=${encodeURIComponent(supplier.name)}&supplierCountry=${encodeURIComponent(supplier.country)}&supplierType=${encodeURIComponent(supplier.type)}&supplierVolume=${encodeURIComponent(supplier.volume)}&supplierStatus=${encodeURIComponent(supplier.dataStatus)}&supplierPcfStatus=${encodeURIComponent(supplier.pcfStatus)}${dmQuery}`,
+                  `/projects/${projectId}/suppliers/${supplierKey}?backTab=data-mgmt&supplierName=${encodeURIComponent(supplier.name)}&supplierCountry=${encodeURIComponent(supplier.country)}&supplierType=${encodeURIComponent(supplier.type)}&supplierVolume=${encodeURIComponent(supplier.volume)}&supplierStatus=${encodeURIComponent(supplier.dataStatus)}&supplierPcfStatus=${encodeURIComponent(supplier.pcfStatus)}${dmQuery}${dmParentQuery}${dmReturnQuery}${dmReturnScnQuery}`,
                 );
               }}
               className="flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-200 hover:bg-gray-100"
@@ -927,7 +1012,7 @@ export function DataManagementNew({
 
         {/* Render children if expanded */}
         {isExpanded && hasChildren && supplier.children!.map(child => 
-          renderSupplierRow(child, level + 1)
+          renderSupplierRow(child, level + 1, supplier)
         )}
       </div>
     );
@@ -1202,6 +1287,10 @@ export function DataManagementNew({
             alert('제출 기한을 선택해주세요.');
             return;
           }
+          if (!isValidCalendarIsoDate(requestDueDate)) {
+            alert('제출 기한을 달력에서 선택해 주세요. (연도 2000~2099, 4자리)');
+            return;
+          }
           if (!linkedProject) {
             alert('실데이터 프로젝트에서만 요청 전송이 가능합니다.');
             return;
@@ -1243,14 +1332,19 @@ export function DataManagementNew({
             due_date: requestDueDate,
             target_supply_chain_node_ids: targetNodeIds,
           };
-          try {
-            await postSupDataRequest(payload);
-            toast.success(`${targetNodeIds.length}개 대상에게 데이터 요청을 전송했습니다.`);
-            setShowRequestModal(false);
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            toast.error(`데이터 요청 전송 실패: ${msg}`);
-          }
+          const n = targetNodeIds.length;
+          setShowRequestModal(false);
+          setRequestMessage("");
+          setRequestDueDate("");
+          setRequestTargets(new Set());
+          toast.promise(postSupDataRequest(payload), {
+            loading: "알림 전송 중…",
+            success: `${n}개 대상에 알림을 보냈습니다.`,
+            error: (e) =>
+              e instanceof Error ? e.message : "알림 전송에 실패했습니다.",
+            duration: 2800,
+            className: "!text-sm !py-2 !px-3 !min-h-0 !gap-1",
+          });
         };
 
         const baseSubtreeRoot = requestModalTree;
@@ -1347,11 +1441,17 @@ export function DataManagementNew({
                       </div>
                       <input
                         type="date"
+                        lang="en-CA"
+                        min="2000-01-01"
+                        max="2099-12-31"
                         value={requestDueDate}
                         onChange={(e) => setRequestDueDate(e.target.value)}
                         className="w-full rounded-[16px] border border-gray-200 p-3 text-sm"
-                        style={{ outline: 'none' }}
+                        style={{ outline: "none" }}
                       />
+                      <p className="mt-2 text-xs" style={{ color: 'var(--aifix-gray)' }}>
+                        연도는 4자리(2000~2099)만 선택할 수 있습니다.
+                      </p>
                     </div>
                   </div>
                 </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -17,12 +17,14 @@ import {
 export function SupGoogleLinkReturnHandler() {
   const router = useRouter();
   const handled = useRef(false);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined" || handled.current) return;
     const sp = new URLSearchParams(window.location.search);
     if (sp.get("google_linked") !== "1") return;
     handled.current = true;
+    setIsProcessing(true);
 
     // 복귀 시 중복 진입 방지 락 해제
     sessionStorage.removeItem(SUP_GOOGLE_LINK_REDIRECT_AT_STORAGE_KEY);
@@ -58,6 +60,24 @@ export function SupGoogleLinkReturnHandler() {
     }
     router.replace(reopenInvite ? "/projects?openSupplierInvite=1" : "/projects");
   }, [router]);
+
+  if (isProcessing) {
+    return (
+      <div className="fixed inset-0 bg-white z-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="mb-4">
+            <div className="inline-block h-12 w-12 animate-spin rounded-full border-4 border-solid border-current border-r-transparent align-[-0.125em] motion-reduce:animate-[spin_1.5s_linear_infinite]" style={{ color: '#5B3BFA' }} role="status">
+              <span className="!absolute !-m-px !h-px !w-px !overflow-hidden !whitespace-nowrap !border-0 !p-0 ![clip:rect(0,0,0,0)]">
+                Loading...
+              </span>
+            </div>
+          </div>
+          <p className="text-lg font-semibold text-gray-900">연동중입니다</p>
+          <p className="text-sm text-gray-600 mt-2">잠시만 기다려주세요...</p>
+        </div>
+      </div>
+    );
+  }
 
   return null;
 }

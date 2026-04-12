@@ -8,6 +8,10 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
+        source: '/favicon.ico',
+        destination: '/icon.svg',
+      },
+      {
         source: '/api/:path*',
         destination: `${API_PROXY_TARGET}/api/:path*`,
       },

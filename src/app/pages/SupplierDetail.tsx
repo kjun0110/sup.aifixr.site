@@ -441,8 +441,10 @@ function parseDeliveryDateForSave(
 ): string | undefined {
   const s = String(raw ?? "").trim();
   if (!s) return undefined;
-  const n = parseInt(s, 10);
-  if (!Number.isNaN(n) && n >= 1 && n <= 31) {
+  /** 숫자만 있는 값은 "일"로만 해석. 32·69 등은 ISO 파싱으로 잘못 통과하지 않도록 여기서 끝낸다. */
+  if (/^\d+$/.test(s)) {
+    const n = parseInt(s, 10);
+    if (n < 1 || n > 31) return undefined;
     const d = new Date(reportingYear, reportingMonth - 1, n);
     if (
       d.getFullYear() !== reportingYear ||
@@ -457,6 +459,91 @@ function parseDeliveryDateForSave(
     return `${y}-${m}-${day}`;
   }
   return parseDeliveryDateIso(raw);
+}
+
+/** 비어 있으면 오류 아님. 값이 있으면 숫자(정수·소수)이고 0 이상 — 위반 시 UI 레드박스용 */
+function isNonNegativeNumericStringInvalid(raw: unknown): boolean {
+  const s = String(raw ?? "")
+    .trim()
+    .replace(/,/g, "");
+  if (s === "") return false;
+  if (/^-/.test(s)) return true;
+  if (!/^(\d+\.?\d*|\.\d+)$/.test(s)) return true;
+  const n = parseFloat(s);
+  return !Number.isFinite(n) || n < 0;
+}
+
+/** 납품 수량(생산량): 숫자만 + 0 이상 — `isNonNegativeNumericStringInvalid`와 동일 규칙 */
+function isProductQuantityInvalid(raw: unknown): boolean {
+  return isNonNegativeNumericStringInvalid(raw);
+}
+
+/**
+ * 납품일 UI 검증. 연·월을 모르면 숫자만 입력일 때 1~31 범위만 검사(69 등 즉시 오류).
+ * 연·월이 있으면 해당 월의 유효 일자까지 검사.
+ */
+function isProductDeliveryDateInvalid(
+  raw: unknown,
+  reportingYear: number | null,
+  reportingMonth: number | null,
+): boolean {
+  const s = String(raw ?? "").trim();
+  if (s === "") return false;
+  if (/^\d+$/.test(s)) {
+    const n = parseInt(s, 10);
+    if (n < 1 || n > 31) return true;
+    if (
+      reportingYear != null &&
+      reportingMonth != null &&
+      Number.isFinite(reportingYear) &&
+      Number.isFinite(reportingMonth)
+    ) {
+      return parseDeliveryDateForSave(s, reportingYear, reportingMonth) == null;
+    }
+    return false;
+  }
+  if (
+    reportingYear != null &&
+    reportingMonth != null &&
+    Number.isFinite(reportingYear) &&
+    Number.isFinite(reportingMonth)
+  ) {
+    return parseDeliveryDateForSave(raw, reportingYear, reportingMonth) == null;
+  }
+  return parseDeliveryDateIso(raw) == null;
+}
+
+/** 저장 직전 — 생산(납품) 탭 모든 행 검증 */
+function validateEditableProductsForSave(
+  rows: Record<string, unknown>[],
+  reportingYear: number,
+  reportingMonth: number,
+): string | null {
+  for (let i = 0; i < rows.length; i++) {
+    const p = rows[i];
+    const rowLabel = `생산(납품) 제품 정보 ${i + 1}행`;
+    const dd = String(p.deliveryDate ?? "").trim();
+    if (dd) {
+      const parsed = parseDeliveryDateForSave(dd, reportingYear, reportingMonth);
+      if (parsed == null) {
+        return `${rowLabel}: 납품일은 ${reportingYear}년 ${reportingMonth}월 기준 1~31의 유효한 일자만 입력할 수 있습니다.`;
+      }
+    }
+    const checks: { key: string; label: string }[] = [
+      { key: "quantity", label: "납품 수량(생산량)" },
+      { key: "standardWeight", label: "단위 실측 중량 (kg per unit)" },
+      { key: "defectiveQuantity", label: "불량품 수량" },
+      { key: "wasteQuantity", label: "폐기물량" },
+    ];
+    for (const { key, label } of checks) {
+      const raw = String(p[key] ?? "").trim();
+      if (!raw) continue;
+      if (isNonNegativeNumericStringInvalid(p[key])) {
+        return `${rowLabel}: ${label}은(는) 0 이상의 숫자만 입력할 수 있습니다.`;
+      }
+    }
+  }
+  return null;
 }
 
 /** 자재·에너지·운송 탭 제품명 컬럼 안내 (계약 품목 + 생산제품 탭 연동) */
@@ -1410,6 +1497,25 @@ export function SupplierDetail() {
     };
   }, [supplierId, projectPkForApi, searchParams, ownProjectDetailForCard]);
 
+  /** 저장 컨텍스트와 별도로, URL의 dmYear/dmMonth·reporting_year/month만으로도 납품일 레드박스 검증 */
+  const reportingYmForProductValidation = useMemo((): {
+    reportingYear: number;
+    reportingMonth: number;
+  } | null => {
+    const full = resolveDmSaveContext();
+    if (full) {
+      return { reportingYear: full.reportingYear, reportingMonth: full.reportingMonth };
+    }
+    const qY = searchParams.get("dmYear") ?? searchParams.get("reporting_year");
+    const qM = searchParams.get("dmMonth") ?? searchParams.get("reporting_month");
+    const y = qY != null && qY !== "" ? parseInt(qY, 10) : NaN;
+    const m = qM != null && qM !== "" ? parseInt(qM, 10) : NaN;
+    if (Number.isFinite(y) && Number.isFinite(m) && m >= 1 && m <= 12) {
+      return { reportingYear: y, reportingMonth: m };
+    }
+    return null;
+  }, [resolveDmSaveContext, searchParams]);
+
   /** `own` + 데이터관리 컨텍스트일 때 월별 저장분을 API에서 불러와 탭 상태와 동기화 (새로고침 후에도 유지) */
   const loadMonthlyDetailFromApi = useCallback(async () => {
     if (supplierId !== "own") return;
@@ -1674,8 +1780,11 @@ export function SupplierDetail() {
   const supplierTierNum =
     supplierId === 'own' ? currentTierNum : (targetTierNum ?? null);
   const parentCompanyFromProject = (ownProjectDetailForCard?.clientName ?? '').trim();
+  /** 데이터 관리 트리에서 상세보기 시 전달: 해당 행의 직상위 공급망 노드 표시명 */
+  const dmDirectParentName = (searchParams.get('dmDirectParentName') ?? '').trim();
   const directUpperTierLabel = (() => {
     if (supplierTierNum === null) return '-';
+    if (dmDirectParentName) return dmDirectParentName;
     if (supplierId === 'own') {
       if (parentCompanyFromProject) return parentCompanyFromProject;
       if (projectId === 'p1' && supplierTierNum === 1) return '삼성SDI';
@@ -2039,6 +2148,15 @@ export function SupplierDetail() {
     }
     setSupSaveBusy(true);
     try {
+      const productErr = validateEditableProductsForSave(
+        editableProducts,
+        ctx.reportingYear,
+        ctx.reportingMonth,
+      );
+      if (productErr) {
+        toast.error(productErr);
+        return;
+      }
       await restoreSupSessionFromCookie();
       const firstProduct = editableProducts.find(
         (p: Record<string, unknown>) =>
@@ -2659,23 +2777,71 @@ export function SupplierDetail() {
               : setEditableTransport;
     const editing = editState?.rowIndex === rowIndex && editState?.field === field;
 
-    const shellClass =
-      'box-border flex h-8 min-h-[32px] w-full min-w-0 max-w-full items-center rounded-md border border-[#E2E8F0] bg-white px-2 text-sm';
+    /** 표시·검증은 항상 `editableProducts` 기준(한글 IME 등으로 prop과 어긋나지 않게) */
+    const productRow =
+      kind === "product" && supplierId === "own"
+        ? (editableProducts[rowIndex] as Record<string, unknown> | undefined)
+        : undefined;
+    const productFieldValue = productRow != null ? productRow[field] : cellValue;
+
+    let productSoftInvalid = false;
+    if (kind === "product") {
+      if (field === "deliveryDate") {
+        const ym = reportingYmForProductValidation;
+        productSoftInvalid = isProductDeliveryDateInvalid(
+          productFieldValue,
+          ym?.reportingYear ?? null,
+          ym?.reportingMonth ?? null,
+        );
+      } else if (field === "quantity") {
+        productSoftInvalid = isProductQuantityInvalid(productFieldValue);
+      } else if (field === "standardWeight" || field === "defectiveQuantity") {
+        productSoftInvalid = isNonNegativeNumericStringInvalid(productFieldValue);
+      }
+    }
+
+    const shellClass = `box-border flex h-8 min-h-[32px] w-full min-w-0 max-w-full items-center rounded-md bg-white px-2 text-sm ${
+      productSoftInvalid
+        ? "border-2 !border-red-600"
+        : "border border-[#E2E8F0]"
+    }`;
+
+    const syncRowValue = (v: string) => {
+      setRows((prev) =>
+        prev.map((r, i) => (i === rowIndex ? { ...r, [field]: v } : r)),
+      );
+    };
 
     if (editing) {
+      const displayValue = String(
+        (kind === "product" && supplierId === "own"
+          ? (editableProducts[rowIndex] as Record<string, unknown> | undefined)?.[field]
+          : cellValue) ?? "",
+      );
+      const decimalInputMode =
+        kind === "product" &&
+        (field === "quantity" ||
+          field === "standardWeight" ||
+          field === "defectiveQuantity");
+
       return (
         <div
-          className={`${shellClass} outline-none ring-2 ring-inset ring-[var(--aifix-primary)]`}
+          className={`${shellClass} outline-none ring-2 ring-inset ${
+            productSoftInvalid ? "!ring-red-500" : "ring-[var(--aifix-primary)]"
+          }`}
         >
           <InputFocusNoScroll
             type="text"
-            className="m-0 h-full min-h-0 w-full min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-sm text-[var(--aifix-navy)] outline-none"
-            value={String(cellValue ?? '')}
+            inputMode={decimalInputMode ? "decimal" : undefined}
+            aria-invalid={productSoftInvalid}
+            className="m-0 h-full min-h-0 w-full min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-sm text-[var(--aifix-navy)] outline-none focus:ring-0"
+            value={displayValue}
             onChange={(e) => {
-              const v = e.target.value;
-              setRows((prev) =>
-                prev.map((r, i) => (i === rowIndex ? { ...r, [field]: v } : r)),
-              );
+              syncRowValue(e.target.value);
+            }}
+            onInput={(e) => {
+              if (kind !== "product") return;
+              syncRowValue((e.target as HTMLInputElement).value);
             }}
             onBlur={() => setEdit(null)}
             onKeyDown={(e) => {
@@ -2702,12 +2868,16 @@ export function SupplierDetail() {
         <span
           className="min-w-0 flex-1 cursor-default truncate"
           onDoubleClick={() => {
-            snapshotRef.current = String(cellValue ?? '');
+            snapshotRef.current = String(
+              (kind === "product" && supplierId === "own" ? productFieldValue : cellValue) ?? "",
+            );
             setEdit({ rowIndex, field });
           }}
           title="더블클릭하여 수정"
         >
-          {String(cellValue ?? '') || '\u00a0'}
+          {String(
+            (kind === "product" && supplierId === "own" ? productFieldValue : cellValue) ?? "",
+          ) || "\u00a0"}
         </span>
       </div>
     );
@@ -3701,7 +3871,14 @@ export function SupplierDetail() {
               } catch {
                 /* ignore */
               }
-              router.push(`/projects/${projectId}?tab=data-mgmt&show=true`);
+              const qs = new URLSearchParams();
+              qs.set('tab', 'data-mgmt');
+              qs.set('show', 'true');
+              const rsid = searchParams.get('dmReturnSupplierId');
+              const rscn = searchParams.get('dmReturnSupplyChainNodeId');
+              if (rsid != null && rsid !== '') qs.set('supplier_id', rsid);
+              if (rscn != null && rscn !== '') qs.set('supply_chain_node_id', rscn);
+              router.push(`/projects/${projectId}?${qs.toString()}`);
             }}
             className="flex items-center gap-2 px-6 py-3 rounded-xl border transition-all duration-200 hover:bg-gray-50"
             style={{

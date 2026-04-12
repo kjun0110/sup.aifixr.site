@@ -69,6 +69,26 @@ export async function postSupDataRequest(
   );
 }
 
+/** 알림 `data_request_target` → 데이터 관리 탭 이동용 */
+export type DataRequestTargetNavigationResponse = {
+  project_id: number;
+  product_id: number;
+  product_variant_id: number;
+  reporting_year: number;
+  reporting_month: number;
+  target_supply_chain_node_id: number;
+};
+
+export async function getDataRequestTargetNavigation(
+  targetId: number,
+  supplierId: number,
+): Promise<DataRequestTargetNavigationResponse> {
+  const q = new URLSearchParams({ supplier_id: String(supplierId) });
+  return apiFetch<DataRequestTargetNavigationResponse>(
+    `${DATA_MGMT_BASE}/sup/data-requests/targets/${targetId}/navigation?${q.toString()}`,
+  );
+}
+
 /** UI 세부탭 id → Tier0 시트 id (원청 export.xlsx 와 동일) */
 export const SUP_DETAIL_TAB_TO_SHEET_ID: Record<string, number> = {
   "company-info": 8,

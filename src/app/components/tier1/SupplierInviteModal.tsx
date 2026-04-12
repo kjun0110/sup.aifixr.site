@@ -61,6 +61,7 @@ type InviteRecord = {
 export type SupplierInviteContext = {
   projectId: number;
   parentNodeId: number | null;
+  myNodeId?: number | null;
 };
 
 function mapApiRowToRecord(r: InvitationHistoryItem): InviteRecord {
@@ -358,6 +359,13 @@ export function SupplierInviteModal({
       return;
     }
     void reloadHistory();
+    
+    // 모달이 열려있는 동안 15초마다 자동 새로고침
+    const intervalId = setInterval(() => {
+      void reloadHistory();
+    }, 15000);
+    
+    return () => clearInterval(intervalId);
   }, [isOpen, useLiveApi, reloadHistory]);
 
   useEffect(() => {

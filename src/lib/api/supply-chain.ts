@@ -32,8 +32,15 @@ export async function getMyProjects(): Promise<SupplierProject[]> {
 }
 
 /** 협력사 프로젝트 상세 조회 */
-export async function getMyProjectDetail(projectId: number): Promise<SupplierProject> {
-  return apiFetch<SupplierProject>(`${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}`);
+export async function getMyProjectDetail(projectId: number, supplierId?: number, supplyChainNodeId?: number): Promise<SupplierProject> {
+  const params = new URLSearchParams();
+  if (supplierId) params.append('supplier_id', supplierId.toString());
+  if (supplyChainNodeId) params.append('supply_chain_node_id', supplyChainNodeId.toString());
+  
+  const url = params.toString()
+    ? `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}?${params.toString()}`
+    : `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}`;
+  return apiFetch<SupplierProject>(url);
 }
 
 /** 내 노드 직하위로 등록한 공급망 노드(모든 상태) — 초대 시 선택·추가 담당자 초대 */
@@ -96,8 +103,10 @@ export type SupplierSubtreeResponse = {
 
 export async function getMySupplyChainSubtree(
   projectId: number,
+  supplyChainNodeId?: number,
 ): Promise<SupplierSubtreeResponse> {
-  return apiFetch<SupplierSubtreeResponse>(
-    `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}/my-supply-subtree`,
-  );
+  const url = supplyChainNodeId
+    ? `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}/my-supply-subtree?supply_chain_node_id=${supplyChainNodeId}`
+    : `${SUPPLY_CHAIN_BASE}/supplier-projects/my-projects/${projectId}/my-supply-subtree`;
+  return apiFetch<SupplierSubtreeResponse>(url);
 }

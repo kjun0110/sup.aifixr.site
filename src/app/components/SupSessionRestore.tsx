@@ -3,7 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { restoreSupSessionFromCookie, AIFIXR_SESSION_UPDATED_EVENT } from '@/lib/api/client';
-import { getSupAccessToken } from '@/lib/api/sessionAccessToken';
+import { getSupAccessToken, getSupAccessTokenPayload } from '@/lib/api/sessionAccessToken';
 
 /**
  * 새로고침 후 HttpOnly 리프레시 쿠키로 액세스 토큰·actor 를 복구합니다.
@@ -18,6 +18,14 @@ export default function SupSessionRestore() {
   const ran = useRef(false);
 
   useEffect(() => {
+    if (process.env.NODE_ENV === 'development' && typeof window !== 'undefined') {
+      (
+        window as Window & {
+          __aifixrSupJwt?: () => Record<string, unknown> | null;
+        }
+      ).__aifixrSupJwt = () => getSupAccessTokenPayload();
+    }
+
     if (
       pathname === '/' ||
       pathname === '' ||
@@ -26,10 +34,13 @@ export default function SupSessionRestore() {
       ran.current = false;
       return;
     }
-    if (ran.current) return;
+    if (ran.current) {
+      return;
+    }
     ran.current = true;
 
-    if (typeof window !== 'undefined' && getSupAccessToken()) {
+    const existingToken = getSupAccessToken();
+    if (typeof window !== 'undefined' && existingToken) {
       window.dispatchEvent(new Event(AIFIXR_SESSION_UPDATED_EVENT));
       return;
     }

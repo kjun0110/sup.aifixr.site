@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { ProjectNav } from "../components/ProjectNav";
 import { SupplyChainManagement } from "../components/SupplyChainManagement";
@@ -41,54 +41,69 @@ export function ProjectView() {
   
   const currentTier = project?.tier || "tier1";
 
+  const supplierIdFromUrl = searchParams.get("supplier_id");
+  const supplyChainNodeIdFromUrl = searchParams.get("supply_chain_node_id");
+
   // 프로젝트 상세 정보 로드
   useEffect(() => {
     if (!projectIdParam) return;
     
-    // 실제 프로젝트인 경우 (real-로 시작하는 경우)
+    // 프로젝트 ID 파싱: real-{id} 형식 또는 숫자 ID
+    let projectId: number;
     if (projectIdParam.startsWith('real-')) {
       const numericId = projectIdParam.replace(/^real-/, '');
-      const projectId = parseInt(numericId, 10);
-
-      if (isNaN(projectId)) {
-        console.error("Invalid project ID:", projectIdParam);
-        setLoading(false);
-        return;
-      }
-
-      let cancelled = false;
-      void (async () => {
-        // 게이트웨이 JWT: 레이아웃의 세션 복구보다 이 effect가 먼저 돌면 Bearer 없이 401 → 선행 복구
-        await restoreSupSessionFromCookie();
-        if (cancelled) return;
-        try {
-          const [data, profile] = await Promise.all([
-            getMyProjectDetail(projectId),
-            getMySupplierProfile().catch(() => null),
-          ]);
-          if (!cancelled) {
-            setProject(data);
-            setSupplierType(profile?.supplier_type ?? "");
-          }
-        } catch (error) {
-          console.error("프로젝트 상세 조회 실패:", error);
-          if (!cancelled && error instanceof Error && error.message.includes("401")) {
-            setSupAccessToken(null);
-            router.push("/");
-          }
-        } finally {
-          if (!cancelled) setLoading(false);
-        }
-      })();
-      return () => {
-        cancelled = true;
-      };
+      projectId = parseInt(numericId, 10);
     } else {
-      // 알 수 없는 프로젝트 ID
-      console.error("Unknown project ID format:", projectIdParam);
-      setLoading(false);
+      // 숫자 ID 직접 사용
+      projectId = parseInt(projectIdParam, 10);
     }
-  }, [projectIdParam, router]);
+
+    if (isNaN(projectId)) {
+      console.error("Invalid project ID:", projectIdParam);
+      setLoading(false);
+      return;
+    }
+
+    const supplierIdParam = supplierIdFromUrl;
+    const supplyChainNodeIdParam = supplyChainNodeIdFromUrl;
+    const supplierIdNum = supplierIdParam ? parseInt(supplierIdParam, 10) : undefined;
+    const supplyChainNodeIdNum = supplyChainNodeIdParam
+      ? parseInt(supplyChainNodeIdParam, 10)
+      : undefined;
+
+    let cancelled = false;
+    void (async () => {
+      // 게이트웨이 JWT: 레이아웃의 세션 복구보다 이 effect가 먼저 돌면 Bearer 없이 401 → 선행 복구
+      await restoreSupSessionFromCookie();
+      if (cancelled) return;
+      try {
+        const [data, profile] = await Promise.all([
+          getMyProjectDetail(
+            projectId,
+            Number.isFinite(supplierIdNum) ? supplierIdNum : undefined,
+            Number.isFinite(supplyChainNodeIdNum) ? supplyChainNodeIdNum : undefined,
+          ),
+          getMySupplierProfile().catch(() => null),
+        ]);
+        if (!cancelled) {
+          setProject(data);
+          setSupplierType(profile?.supplier_type ?? "");
+        }
+      } catch (error) {
+        console.error("프로젝트 상세 조회 실패:", error);
+        if (!cancelled && error instanceof Error && error.message.includes("401")) {
+          setSupAccessToken(null);
+          router.push("/");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    /** `show`·`tab` 등 조회 UI 쿼리 변경마다 프로젝트 재조회하지 않음 — 노드/공급사 컨텍스트만 반영 */
+  }, [projectIdParam, router, supplierIdFromUrl, supplyChainNodeIdFromUrl]);
 
   // URL 파라미터에서 탭 읽기
   useEffect(() => {
@@ -102,6 +117,46 @@ export function ProjectView() {
       setActiveTab(tabFromUrl);
     }
   }, [searchParams]);
+
+  const dataMgmtLinkedProject = useMemo(() => {
+    if (
+      project?.project_id != null &&
+      project?.product_id != null &&
+      project?.supplier_id != null
+    ) {
+      return {
+        projectId: project.project_id,
+        productId: project.product_id,
+        supplierId: project.supplier_id,
+        productVariantId: project.product_variant_id ?? null,
+        supplyChainNodeId: project.my_supply_chain_node_id ?? null,
+      };
+    }
+    return null;
+  }, [
+    project?.project_id,
+    project?.product_id,
+    project?.supplier_id,
+    project?.product_variant_id,
+    project?.my_supply_chain_node_id,
+  ]);
+
+  const dataMgmtExportLabel = useMemo(() => {
+    if (project?.name != null && String(project.name).trim() !== "") {
+      return String(project.name).trim();
+    }
+    if (project?.productName != null && String(project.productName).trim() !== "") {
+      return String(project.productName).trim();
+    }
+    return null;
+  }, [project?.name, project?.productName]);
+
+  const dataMgmtClientName = useMemo(() => {
+    if (project?.clientName != null && String(project.clientName).trim() !== "") {
+      return String(project.clientName).trim();
+    }
+    return null;
+  }, [project?.clientName]);
 
   if (loading) {
     return <div className="p-8 text-center">프로젝트 정보를 불러오는 중...</div>;
@@ -131,6 +186,7 @@ export function ProjectView() {
                 ? {
                     projectId: project.project_id,
                     parentNodeId: project.my_supply_chain_node_id ?? null,
+                    myNodeId: project.my_supply_chain_node_id ?? null,
                   }
                 : null
             }
@@ -142,25 +198,9 @@ export function ProjectView() {
         return (
           <DataManagementNew
             tier={currentTier}
-            linkedProject={
-              project?.project_id != null &&
-              project?.product_id != null &&
-              project?.supplier_id != null
-                ? {
-                    projectId: project.project_id,
-                    productId: project.product_id,
-                    supplierId: project.supplier_id,
-                    productVariantId: project.product_variant_id ?? null,
-                  }
-                : null
-            }
-            linkedProjectExportLabel={
-              project?.name != null && String(project.name).trim() !== ""
-                ? String(project.name).trim()
-                : project?.productName != null && String(project.productName).trim() !== ""
-                  ? String(project.productName).trim()
-                  : null
-            }
+            linkedProject={dataMgmtLinkedProject}
+            linkedProjectExportLabel={dataMgmtExportLabel}
+            linkedProjectClientName={dataMgmtClientName}
           />
         );
 
@@ -172,10 +212,29 @@ export function ProjectView() {
           ? <Tier1DataLookup />
           : <NonTier1DataView tier={currentTier} />;
       
-      case "pcf-submit":
-        return currentTier === "tier1"
-          ? <Tier1PCFSubmit supplierType={supplierType} />
-          : <NonTier1PCFSubmit tier={currentTier} supplierType={supplierType} />;
+      case "pcf-submit": {
+        const urlSupplyChainNodeId = searchParams.get('supply_chain_node_id');
+        const pcfLinked =
+          project?.project_id != null && project?.product_id != null
+            ? {
+                projectId: project.project_id,
+                productId: project.product_id,
+                productVariantId: project.product_variant_id ?? null,
+                supplyChainNodeId: urlSupplyChainNodeId 
+                  ? parseInt(urlSupplyChainNodeId)
+                  : project.my_supply_chain_node_id ?? null,
+              }
+            : null;
+        return currentTier === "tier1" ? (
+          <Tier1PCFSubmit supplierType={supplierType} linkedProject={pcfLinked} />
+        ) : (
+          <NonTier1PCFSubmit
+            tier={currentTier as "tier2" | "tier3"}
+            supplierType={supplierType}
+            linkedProject={pcfLinked}
+          />
+        );
+      }
       
       case "transmission":
         return currentTier === "tier1"
